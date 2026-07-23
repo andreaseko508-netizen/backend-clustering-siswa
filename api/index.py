@@ -123,6 +123,16 @@ def calculate_cluster_metrics(df, features, assignments, k):
             }
         }
 
+        # Rekomendasi Perbaikan Otomatis (Advisor)
+        improvement_advice = []
+        if sil < 0.25:
+            improvement_advice.append("Gunakan 'Standardisasi Z-Score' jika fitur memiliki rentang nilai yang sangat berbeda.")
+            improvement_advice.append("Coba kurangi atau tambah nilai K menggunakan referensi grafik Elbow.")
+        if dbi > 1.2:
+            improvement_advice.append("Sistem mendeteksi overlap antar cluster. Pastikan outlier sudah dibersihkan pada tahap preprocessing.")
+        if sil > 0.5 and dbi < 0.8:
+            improvement_advice.append("Kualitas clustering optimal. Hasil sudah sangat layak untuk interpretasi riset.")
+
         return {
             "davies_bouldin_index": dbi,
             "silhouette_score": sil,
@@ -131,6 +141,7 @@ def calculate_cluster_metrics(df, features, assignments, k):
             "distribution": dist,
             "cluster_profiles": profiles,
             "scientific_details": scientific_details,
+            "improvement_advice": improvement_advice,
             "dbi": dbi
         }
     except Exception as e:
@@ -478,6 +489,11 @@ async def auto_converge(x_session_id: Optional[str] = Header(None)):
     })
 
     df["cluster"] = assignments.tolist()
+
+    # Rigiditas: Calculate Euclidean distances to each centroid for Decision Support (SPK)
+    for j in range(state["k"]):
+        df[f"dist_c{j}"] = np.linalg.norm(X - centroids[j], axis=1).tolist()
+
     sessions[x_session_id].update({"df": df, "metrics": evaluation})
 
     add_to_checklist(x_session_id, "Clustering Finalized")
@@ -492,6 +508,13 @@ async def run_kmeans_step(x_session_id: Optional[str] = Header(None), params: Di
     features = sessions[x_session_id]["config"].get("features", list(df.select_dtypes(include=[np.number]).columns))
     model = KMeans(n_clusters=params.get("k", 3), n_init=10, random_state=42).fit(df[features].fillna(0))
     df['cluster'] = model.labels_
+
+    # Rigiditas: Calculate Euclidean distances to each centroid for Decision Support (SPK)
+    X = df[features].fillna(0).values
+    centroids = model.cluster_centers_
+    for j in range(params.get("k", 3)):
+        df[f"dist_c{j}"] = np.linalg.norm(X - centroids[j], axis=1).tolist()
+
     metrics = calculate_cluster_metrics(df, features, model.labels_, params.get("k", 3))
     metrics.update({"wcss": model.inertia_, "iterations": model.n_iter_, "centroids": model.cluster_centers_.tolist(), "feature_names": features})
     sessions[x_session_id].update({"df": df, "metrics": metrics})
