@@ -108,14 +108,14 @@ async def root():
         "status": "Online",
         "engine": "SIMORBATAS-Vercel",
         "message": "Server Riset Clustering Siswa siap melayani aplikasi Android Anda.",
-        "endpoints": ["/api/health", "/api/stepwise/upload", "/api/stepwise/final-analysis"]
+        "endpoints": ["/health", "/stepwise/upload", "/stepwise/final-analysis"]
     }
 
-@app.get("/api/health")
+@app.get("/health")
 async def health():
     return {"status": "UP", "engine": "Vercel Serverless Python", "firebase": "Connected" if db else "Offline"}
 
-@app.post("/api/stepwise/upload/")
+@app.post("/stepwise/upload/")
 async def stepwise_upload(file: UploadFile = File(...), x_session_id: Optional[str] = Header(None)):
     if not x_session_id: x_session_id = str(uuid.uuid4())
     try:
@@ -134,14 +134,14 @@ async def stepwise_upload(file: UploadFile = File(...), x_session_id: Optional[s
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/stepwise/raw-data/")
+@app.get("/stepwise/raw-data/")
 async def get_raw_data(x_session_id: Optional[str] = Header(None)):
     await ensure_session(x_session_id)
     if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
     df = sessions[x_session_id]["df"]
     return {"columns": list(df.columns), "total_rows": int(len(df)), "data": df.replace([np.inf, -np.inf], np.nan).fillna(0).to_dict(orient="records")}
 
-@app.post("/api/stepwise/cleaning/")
+@app.post("/stepwise/cleaning/")
 async def stepwise_cleaning(x_session_id: Optional[str] = Header(None)):
     await ensure_session(x_session_id)
     if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
@@ -156,7 +156,7 @@ async def stepwise_cleaning(x_session_id: Optional[str] = Header(None)):
     sync_session_to_firebase(x_session_id)
     return {"status": "success", "final_rows": len(df), "log": f"Cleaning selesai: {initial_rows - len(df)} baris dihapus."}
 
-@app.post("/api/stepwise/missing-value/")
+@app.post("/stepwise/missing-value/")
 async def stepwise_missing(x_session_id: Optional[str] = Header(None)):
     await ensure_session(x_session_id)
     if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
@@ -170,7 +170,7 @@ async def stepwise_missing(x_session_id: Optional[str] = Header(None)):
     sync_session_to_firebase(x_session_id)
     return {"status": "success", "log": "Imputasi selesai."}
 
-@app.post("/api/stepwise/conversion/")
+@app.post("/stepwise/conversion/")
 async def stepwise_conversion(x_session_id: Optional[str] = Header(None)):
     await ensure_session(x_session_id)
     if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
@@ -188,7 +188,7 @@ async def stepwise_conversion(x_session_id: Optional[str] = Header(None)):
     sync_session_to_firebase(x_session_id)
     return {"status": "success", "mappings": mapping_details}
 
-@app.post("/api/stepwise/normalization/")
+@app.post("/stepwise/normalization/")
 async def stepwise_norm(x_session_id: Optional[str] = Header(None)):
     await ensure_session(x_session_id)
     from sklearn.preprocessing import MinMaxScaler
@@ -204,8 +204,8 @@ async def stepwise_norm(x_session_id: Optional[str] = Header(None)):
         sync_session_to_firebase(x_session_id)
     return {"status": "success"}
 
-@app.post("/api/stepwise/save_config/")
-@app.post("/api/stepwise/mapping-config/")
+@app.post("/stepwise/save_config/")
+@app.post("/stepwise/mapping-config/")
 async def stepwise_mapping(x_session_id: Optional[str] = Header(None), config: Dict[str, Any] = Body(...)):
     await ensure_session(x_session_id)
     if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
@@ -213,7 +213,7 @@ async def stepwise_mapping(x_session_id: Optional[str] = Header(None), config: D
     sync_session_to_firebase(x_session_id)
     return {"status": "success"}
 
-@app.post("/api/stepwise/run-kmeans/")
+@app.post("/stepwise/run-kmeans/")
 async def run_kmeans_step(x_session_id: Optional[str] = Header(None), params: Dict[str, Any] = Body({"k": 3})):
     await ensure_session(x_session_id)
     if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
@@ -241,7 +241,7 @@ async def run_kmeans_step(x_session_id: Optional[str] = Header(None), params: Di
     sync_session_to_firebase(x_session_id)
     return {"status": "SUCCESS", "metrics": metrics}
 
-@app.get("/api/stepwise/final-analysis/")
+@app.get("/stepwise/final-analysis/")
 async def get_final_analysis(x_session_id: Optional[str] = Header(None)):
     await ensure_session(x_session_id)
     if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
@@ -262,13 +262,13 @@ async def get_final_analysis(x_session_id: Optional[str] = Header(None)):
         "hasil_cluster": session["df"].to_dict(orient="records")
     }
 
-@app.get("/api/stepwise/checkpoints/")
+@app.get("/stepwise/checkpoints/")
 async def get_checkpoints(x_session_id: Optional[str] = Header(None)):
     await ensure_session(x_session_id)
     if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
     return {"status": "success", "checkpoints": sessions[x_session_id].get("checkpoints", {})}
 
-@app.get("/api/stepwise/export-excel/")
+@app.get("/stepwise/export-excel/")
 async def export_excel(x_session_id: Optional[str] = Header(None)):
     await ensure_session(x_session_id)
     if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
