@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv
+env/
+venv/
+ENV/
+serviceAccountKey.json
+artifacts/
+temp/
+*.xlsx
+*.txt
+.DS_Store

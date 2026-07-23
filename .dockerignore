@@ -1,0 +1,12 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.db
+.env
+.git
+.gitignore
+*.json
+!serviceAccountKey.json
+artifacts/
+temp/
