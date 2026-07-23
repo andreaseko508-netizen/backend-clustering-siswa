@@ -18,7 +18,7 @@ base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if base_dir not in sys.path:
     sys.path.append(base_dir)
 
-app = FastAPI(title="SIMORBATAS Python AI Runtime (Vercel)", version="1.4.0")
+app = FastAPI(title="SIMORBATAS Python AI Runtime (Vercel)", version="1.5.0")
 
 # Initialize Firebase Admin SDK
 db = None
@@ -331,16 +331,40 @@ async def check_convergence(x_session_id: Optional[str] = Header(None)):
 async def auto_converge(x_session_id: Optional[str] = Header(None)):
     await ensure_session(x_session_id)
     state = sessions[x_session_id].get("algo_state")
-    from sklearn.cluster import KMeans
-    X = sessions[x_session_id]["df"][state["features"]].fillna(0).values
-    model = KMeans(n_clusters=state["k"], n_init=10, random_state=42).fit(X)
-    state.update({"iteration": int(model.n_iter_), "centroids": model.cluster_centers_.tolist(), "assignments": model.labels_.tolist(), "is_converged": True, "history": [{"iter": i, "wcss": 0.0, "movement": 0.0} for i in range(1, model.n_iter_ + 1)]})
-    state["history"][-1]["wcss"] = float(model.inertia_)
-    evaluation = calculate_cluster_metrics(sessions[x_session_id]["df"], state["features"], model.labels_, state["k"])
-    sessions[x_session_id]["df"]["cluster"] = model.labels_.tolist()
-    sessions[x_session_id]["metrics"] = evaluation
+    df = sessions[x_session_id]["df"]
+    features = state["features"]
+    X = df[features].fillna(0).values
+
+    # MANUAL K-MEANS LOOP to capture real history for research validation
+    # This prevents the 'all 0.0' issue in Step 18
+    centroids = np.array(state["centroids"])
+    history = []
+    assignments = np.zeros(len(X))
+
+    for i in range(1, 101): # Max 100 iterations
+        # 1. Calculate Distances & Assignments
+        dists = np.linalg.norm(X[:, np.newaxis] - centroids, axis=2)
+        assignments = np.argmin(dists, axis=1)
+        wcss = float(np.sum(np.min(dists, axis=1)**2))
+
+        # 2. Update Centroids
+        new_centroids = np.array([X[assignments == j].mean(axis=0) if len(X[assignments == j]) > 0 else centroids[j] for j in range(state["k"])])
+        movement = float(np.linalg.norm(new_centroids - centroids))
+
+        # 3. Record History
+        history.append({"iter": i, "wcss": wcss, "movement": movement})
+
+        centroids = new_centroids
+        if movement < 1e-4: break
+
+    state.update({"iteration": len(history), "centroids": centroids.tolist(), "assignments": assignments.tolist(), "is_converged": True, "history": history})
+
+    evaluation = calculate_cluster_metrics(df, features, assignments, state["k"])
+    df["cluster"] = assignments.tolist()
+    sessions[x_session_id].update({"df": df, "metrics": evaluation})
+
     sync_session_to_firebase(x_session_id)
-    return {"status": "success", "is_converged": True, "iteration": state["iteration"], "history": state["history"], "centroids": state["centroids"], "evaluation": evaluation}
+    return {"status": "success", "is_converged": True, "iteration": state["iteration"], "history": history, "centroids": state["centroids"], "evaluation": evaluation}
 
 @app.post("/stepwise/run-kmeans/")
 async def run_kmeans_step(x_session_id: Optional[str] = Header(None), params: Dict[str, Any] = Body({"k": 3})):
