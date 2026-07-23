@@ -18,7 +18,7 @@ base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if base_dir not in sys.path:
     sys.path.append(base_dir)
 
-app = FastAPI(title="SIMORBATAS Python AI Runtime (Vercel)", version="1.3.0")
+app = FastAPI(title="SIMORBATAS Python AI Runtime (Vercel)", version="1.4.0")
 
 # Initialize Firebase Admin SDK
 db = None
@@ -81,8 +81,8 @@ def calculate_cluster_metrics(df, features, assignments, k):
         sil = float(silhouette_score(X, assignments)) if len(unique_labels) > 1 else 0.0
         dist = {str(i): {"count": int(np.sum(assignments == i)), "percentage": float(np.sum(assignments == i) / len(df) * 100)} for i in range(k)}
         profiles = {str(i): df[assignments == i][features].mean(numeric_only=True).to_dict() for i in range(k)}
-        return {"davies_bouldin_index": dbi, "silhouette_score": sil, "distribution": dist, "cluster_profiles": profiles, "dbi": dbi} # added 'dbi' key for some UI compatibility
-    except: return {"davies_bouldin_index": 0.0, "silhouette_score": 0.0, "distribution": {}, "cluster_profiles": {}}
+        return {"davies_bouldin_index": dbi, "silhouette_score": sil, "distribution": dist, "cluster_profiles": profiles, "dbi": dbi}
+    except: return {"davies_bouldin_index": 0.0, "silhouette_score": 0.0, "distribution": {}, "cluster_profiles": {}, "dbi": 0.0}
 
 # --- ENDPOINTS ---
 
@@ -267,7 +267,7 @@ async def init_centroids_step(x_session_id: Optional[str] = Header(None), params
     centroids = num_df.sample(n=k).values.tolist()
     sessions[x_session_id]["algo_state"] = {"iteration": 0, "centroids": centroids, "features": features, "k": k, "history": [], "is_converged": False}
     sync_session_to_firebase(x_session_id)
-    return {"status": "success", "centroids": centroids, "features": features}
+    return {"status": "success", "centroids": centroids, "features": features, "message": "Inisialisasi berhasil."}
 
 @app.post("/stepwise/calculate-distances/")
 async def calculate_distances_step(x_session_id: Optional[str] = Header(None)):
@@ -279,18 +279,20 @@ async def calculate_distances_step(x_session_id: Optional[str] = Header(None)):
     distances = [np.linalg.norm(centroids - row.values, axis=1).tolist() for _, row in num_df.iterrows()]
     state["distances"] = distances
     sync_session_to_firebase(x_session_id)
-    return {"status": "success", "distance_matrix_sample": distances[:5]}
+    return {"status": "success", "distance_matrix_sample": distances[:5], "sample_work": {"distances": distances[0]}}
 
 @app.post("/stepwise/assign-clusters/")
 async def assign_clusters_step(x_session_id: Optional[str] = Header(None)):
     await ensure_session(x_session_id)
     state = sessions[x_session_id].get("algo_state")
+    if not state or "distances" not in state: raise HTTPException(status_code=400, detail="Distances not calculated")
     distances = np.array(state["distances"])
     assignments = np.argmin(distances, axis=1).tolist()
     state["assignments"] = assignments
     state["current_wcss"] = float(np.sum(np.min(distances, axis=1)**2))
+    counts = {str(i): int(np.sum(np.array(assignments) == i)) for i in range(state["k"])}
     sync_session_to_firebase(x_session_id)
-    return {"status": "success", "assignments": assignments, "wcss": state["current_wcss"]}
+    return {"status": "success", "assignments": assignments, "wcss": state["current_wcss"], "counts": counts}
 
 @app.post("/stepwise/update-centroids/")
 async def update_centroids_step(x_session_id: Optional[str] = Header(None)):
@@ -299,33 +301,29 @@ async def update_centroids_step(x_session_id: Optional[str] = Header(None)):
     num_df = sessions[x_session_id]["df"][state["features"]].fillna(0)
     assignments = np.array(state["assignments"])
     old_centroids = np.array(state["centroids"])
-    new_centroids = [num_df[assignments == i].mean(axis=0).values.tolist() for i in range(state["k"])]
+    new_centroids = []
+    for i in range(state["k"]):
+        cluster_points = num_df[assignments == i]
+        new_centroids.append(cluster_points.mean(axis=0).values.tolist() if len(cluster_points) > 0 else old_centroids[i].tolist())
 
     movement = float(np.linalg.norm(np.array(new_centroids) - old_centroids))
     state["centroids"] = new_centroids
     state["iteration"] += 1
-    state["history"].append({"iter": state["iteration"], "wcss": state["current_wcss"], "movement": movement})
-
+    state["history"].append({"iter": state["iteration"], "wcss": state.get("current_wcss", 0.0), "movement": movement})
     sync_session_to_firebase(x_session_id)
-    return {"status": "success", "new_centroids": new_centroids, "iteration": state["iteration"], "movement": movement}
+    return {"status": "success", "new_centroids": new_centroids, "iteration": state["iteration"], "movement": movement, "sample_work": {"explanation": "Centroid baru dihitung dari rata-rata anggota cluster."}}
 
 @app.post("/stepwise/check-convergence/")
 async def check_convergence(x_session_id: Optional[str] = Header(None)):
     await ensure_session(x_session_id)
     state = sessions[x_session_id].get("algo_state")
     if not state: raise HTTPException(status_code=400, detail="Algo state missing")
-
-    is_converged = False
-    if state["history"]:
-        is_converged = state["history"][-1]["movement"] < 1e-4
-        state["is_converged"] = is_converged
-
-    evaluation = {}
+    is_converged = state["history"][-1]["movement"] < 1e-4 if state["history"] else False
+    state["is_converged"] = is_converged
+    evaluation = calculate_cluster_metrics(sessions[x_session_id]["df"], state["features"], np.array(state["assignments"]), state["k"]) if is_converged else {}
     if is_converged:
-        evaluation = calculate_cluster_metrics(sessions[x_session_id]["df"], state["features"], np.array(state["assignments"]), state["k"])
         sessions[x_session_id]["df"]["cluster"] = state["assignments"]
         sessions[x_session_id]["metrics"] = evaluation
-
     sync_session_to_firebase(x_session_id)
     return {"status": "success", "is_converged": is_converged, "iteration": state["iteration"], "history": state["history"], "centroids": state["centroids"], "evaluation": evaluation}
 
@@ -333,25 +331,14 @@ async def check_convergence(x_session_id: Optional[str] = Header(None)):
 async def auto_converge(x_session_id: Optional[str] = Header(None)):
     await ensure_session(x_session_id)
     state = sessions[x_session_id].get("algo_state")
-    df = sessions[x_session_id]["df"]
-    features = state["features"]
-    X = df[features].fillna(0).values
-
     from sklearn.cluster import KMeans
-    model = KMeans(n_clusters=state["k"], init='k-means++', n_init=10, random_state=42).fit(X)
-    state["iteration"] = int(model.n_iter_)
-    state["centroids"] = model.cluster_centers_.tolist()
-    state["assignments"] = model.labels_.tolist()
-    state["is_converged"] = True
-
-    # Simple history for UI
-    state["history"] = [{"iter": i, "wcss": 0.0, "movement": 0.0} for i in range(1, model.n_iter_ + 1)]
+    X = sessions[x_session_id]["df"][state["features"]].fillna(0).values
+    model = KMeans(n_clusters=state["k"], n_init=10, random_state=42).fit(X)
+    state.update({"iteration": int(model.n_iter_), "centroids": model.cluster_centers_.tolist(), "assignments": model.labels_.tolist(), "is_converged": True, "history": [{"iter": i, "wcss": 0.0, "movement": 0.0} for i in range(1, model.n_iter_ + 1)]})
     state["history"][-1]["wcss"] = float(model.inertia_)
-
-    evaluation = calculate_cluster_metrics(df, features, model.labels_, state["k"])
-    df["cluster"] = model.labels_
-    sessions[x_session_id].update({"df": df, "metrics": evaluation})
-
+    evaluation = calculate_cluster_metrics(sessions[x_session_id]["df"], state["features"], model.labels_, state["k"])
+    sessions[x_session_id]["df"]["cluster"] = model.labels_.tolist()
+    sessions[x_session_id]["metrics"] = evaluation
     sync_session_to_firebase(x_session_id)
     return {"status": "success", "is_converged": True, "iteration": state["iteration"], "history": state["history"], "centroids": state["centroids"], "evaluation": evaluation}
 
@@ -361,8 +348,7 @@ async def run_kmeans_step(x_session_id: Optional[str] = Header(None), params: Di
     from sklearn.cluster import KMeans
     df = sessions[x_session_id]["df"]
     features = sessions[x_session_id]["config"].get("features", list(df.select_dtypes(include=[np.number]).columns))
-    X = df[features].fillna(0)
-    model = KMeans(n_clusters=params.get("k", 3), n_init=10, random_state=42).fit(X)
+    model = KMeans(n_clusters=params.get("k", 3), n_init=10, random_state=42).fit(df[features].fillna(0))
     df['cluster'] = model.labels_
     metrics = calculate_cluster_metrics(df, features, model.labels_, params.get("k", 3))
     metrics.update({"wcss": model.inertia_, "iterations": model.n_iter_, "centroids": model.cluster_centers_.tolist(), "feature_names": features})
