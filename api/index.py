@@ -5,6 +5,7 @@ import os
 import sys
 import pandas as pd
 import numpy as np
+import time
 from sklearn.metrics import davies_bouldin_score, silhouette_score, calinski_harabasz_score
 import io
 import uuid
@@ -18,7 +19,7 @@ base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if base_dir not in sys.path:
     sys.path.append(base_dir)
 
-app = FastAPI(title="SIMORBATAS Python AI Runtime (Vercel)", version="1.6.0")
+app = FastAPI(title="SIMORBATAS Python AI Runtime (Vercel)", version="1.7.0")
 
 # Initialize Firebase Admin SDK
 db = None
@@ -80,12 +81,25 @@ def calculate_cluster_metrics(df, features, assignments, k):
     try:
         X = df[features].select_dtypes(include=[np.number]).fillna(0)
         unique_labels = np.unique(assignments)
+
         dbi = float(davies_bouldin_score(X, assignments)) if len(unique_labels) > 1 else 0.0
         sil = float(silhouette_score(X, assignments)) if len(unique_labels) > 1 else 0.0
+        chi = float(calinski_harabasz_score(X, assignments)) if len(unique_labels) > 1 else 0.0
+
         dist = {str(i): {"count": int(np.sum(assignments == i)), "percentage": float(np.sum(assignments == i) / len(df) * 100)} for i in range(k)}
         profiles = {str(i): df[assignments == i][features].mean(numeric_only=True).to_dict() for i in range(k)}
-        return {"davies_bouldin_index": dbi, "silhouette_score": sil, "distribution": dist, "cluster_profiles": profiles, "dbi": dbi}
-    except: return {"davies_bouldin_index": 0.0, "silhouette_score": 0.0, "distribution": {}, "cluster_profiles": {}, "dbi": 0.0}
+
+        return {
+            "davies_bouldin_index": dbi,
+            "silhouette_score": sil,
+            "calinski_harabasz_index": chi,
+            "distribution": dist,
+            "cluster_profiles": profiles,
+            "dbi": dbi
+        }
+    except Exception as e:
+        print(f"Metrics Error: {e}")
+        return {"davies_bouldin_index": 0.0, "silhouette_score": 0.0, "calinski_harabasz_index": 0.0, "distribution": {}, "cluster_profiles": {}, "dbi": 0.0}
 
 # --- ENDPOINTS ---
 
@@ -103,7 +117,14 @@ async def stepwise_upload(file: UploadFile = File(...), x_session_id: Optional[s
     try:
         content = await file.read()
         df = pd.read_csv(io.BytesIO(content)) if file.filename.endswith('.csv') else pd.read_excel(io.BytesIO(content))
-        sessions[x_session_id] = {"df": df, "filename": file.filename, "config": {}, "metrics": {}, "checkpoints": {"Data Asli": df.head(100).to_dict(orient="records")}, "audit": {"initial_rows": len(df), "initial_cols": len(df.columns), "missing_before": int(df.isnull().sum().sum()), "outliers_removed": 0, "normalization_method": "None", "execution_checklist": []}}
+        sessions[x_session_id] = {
+            "df": df,
+            "filename": file.filename,
+            "config": {"filename": file.filename},
+            "metrics": {},
+            "checkpoints": {"Data Asli": df.head(100).to_dict(orient="records")},
+            "audit": {"initial_rows": len(df), "initial_cols": len(df.columns), "missing_before": int(df.isnull().sum().sum()), "outliers_removed": 0, "normalization_method": "None", "execution_checklist": []}
+        }
         sync_session_to_firebase(x_session_id)
         return {"status": "success", "jumlah_data": len(df), "columns": list(df.columns), "session_id": x_session_id}
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
@@ -351,6 +372,8 @@ async def auto_converge(x_session_id: Optional[str] = Header(None)):
     features = state["features"]
     X = df[features].fillna(0).values
 
+    start_time = time.time()
+
     # MANUAL K-MEANS LOOP to capture real history for research validation
     centroids = np.array(state["centroids"])
     history = []
@@ -372,9 +395,26 @@ async def auto_converge(x_session_id: Optional[str] = Header(None)):
         centroids = new_centroids
         if movement < 1e-4: break
 
-    state.update({"iteration": len(history), "centroids": centroids.tolist(), "assignments": assignments.tolist(), "is_converged": True, "history": history})
+    end_time = time.time()
+    runtime = float(end_time - start_time)
+
+    state.update({
+        "iteration": len(history),
+        "centroids": centroids.tolist(),
+        "assignments": assignments.tolist(),
+        "is_converged": True,
+        "history": history,
+        "runtime_sec": runtime,
+        "current_wcss": history[-1]["wcss"] if history else 0.0
+    })
 
     evaluation = calculate_cluster_metrics(df, features, assignments, state["k"])
+    evaluation.update({
+        "wcss": state["current_wcss"],
+        "iterations": state["iteration"],
+        "runtime_sec": runtime
+    })
+
     df["cluster"] = assignments.tolist()
     sessions[x_session_id].update({"df": df, "metrics": evaluation})
 
@@ -400,14 +440,35 @@ async def run_kmeans_step(x_session_id: Optional[str] = Header(None), params: Di
 @app.get("/stepwise/final-analysis/")
 async def get_final_analysis(x_session_id: Optional[str] = Header(None)):
     await ensure_session(x_session_id)
+    if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
     session = sessions[x_session_id]
     metrics = session.get("metrics", {})
-    return {"status": "success", "jumlah_data": len(session["df"]), "metrics": metrics, "silhouette_score": metrics.get("silhouette_score", 0.0), "davies_bouldin_index": metrics.get("davies_bouldin_index", 0.0), "wcss": metrics.get("wcss", 0.0), "iterations": metrics.get("iterations", 0), "cluster_distribution": metrics.get("distribution", {}), "cluster_profiles": metrics.get("cluster_profiles", {}), "centroids": metrics.get("centroids", []), "feature_names": metrics.get("feature_names", []), "hasil_cluster": session["df"].to_dict(orient="records")}
+
+    # Android compatibility fix: ensure key consistency
+    result = {
+        "status": "success",
+        "jumlah_data": len(session["df"]),
+        "config": session.get("config", {}),
+        "metrics": metrics,
+        "silhouette_score": metrics.get("silhouette_score", 0.0),
+        "davies_bouldin_index": metrics.get("davies_bouldin_index", 0.0),
+        "calinski_harabasz_index": metrics.get("calinski_harabasz_index", 0.0),
+        "wcss": metrics.get("wcss", 0.0),
+        "iterations": metrics.get("iterations", 0),
+        "runtime_sec": metrics.get("runtime_sec", 0.0),
+        "cluster_distribution": metrics.get("distribution", {}),
+        "cluster_profiles": metrics.get("cluster_profiles", {}),
+        "centroids": metrics.get("centroids", []),
+        "feature_names": metrics.get("feature_names", list(session["df"].select_dtypes(include=[np.number]).columns)),
+        "hasil_cluster": session["df"].to_dict(orient="records")
+    }
+    return result
 
 @app.post("/stepwise/save_config/")
 @app.post("/stepwise/mapping-config/")
 async def stepwise_mapping(x_session_id: Optional[str] = Header(None), config: Dict[str, Any] = Body(...)):
     await ensure_session(x_session_id)
+    if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
     sessions[x_session_id]["config"].update(config)
     sync_session_to_firebase(x_session_id)
     return {"status": "success"}
