@@ -18,7 +18,7 @@ base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if base_dir not in sys.path:
     sys.path.append(base_dir)
 
-app = FastAPI(title="SIMORBATAS Python AI Runtime (Vercel)", version="1.2.0")
+app = FastAPI(title="SIMORBATAS Python AI Runtime (Vercel)", version="1.3.0")
 
 # Initialize Firebase Admin SDK
 db = None
@@ -81,7 +81,7 @@ def calculate_cluster_metrics(df, features, assignments, k):
         sil = float(silhouette_score(X, assignments)) if len(unique_labels) > 1 else 0.0
         dist = {str(i): {"count": int(np.sum(assignments == i)), "percentage": float(np.sum(assignments == i) / len(df) * 100)} for i in range(k)}
         profiles = {str(i): df[assignments == i][features].mean(numeric_only=True).to_dict() for i in range(k)}
-        return {"davies_bouldin_index": dbi, "silhouette_score": sil, "distribution": dist, "cluster_profiles": profiles}
+        return {"davies_bouldin_index": dbi, "silhouette_score": sil, "distribution": dist, "cluster_profiles": profiles, "dbi": dbi} # added 'dbi' key for some UI compatibility
     except: return {"davies_bouldin_index": 0.0, "silhouette_score": 0.0, "distribution": {}, "cluster_profiles": {}}
 
 # --- ENDPOINTS ---
@@ -265,7 +265,7 @@ async def init_centroids_step(x_session_id: Optional[str] = Header(None), params
     features = sessions[x_session_id]["config"].get("features", list(df.select_dtypes(include=[np.number]).columns))
     num_df = df[features].select_dtypes(include=[np.number]).fillna(0).replace([np.inf, -np.inf], 0)
     centroids = num_df.sample(n=k).values.tolist()
-    sessions[x_session_id]["algo_state"] = {"iteration": 0, "centroids": centroids, "features": features, "k": k, "history": []}
+    sessions[x_session_id]["algo_state"] = {"iteration": 0, "centroids": centroids, "features": features, "k": k, "history": [], "is_converged": False}
     sync_session_to_firebase(x_session_id)
     return {"status": "success", "centroids": centroids, "features": features}
 
@@ -295,14 +295,65 @@ async def assign_clusters_step(x_session_id: Optional[str] = Header(None)):
 @app.post("/stepwise/update-centroids/")
 async def update_centroids_step(x_session_id: Optional[str] = Header(None)):
     await ensure_session(x_session_id)
-    state = sessions[x_session_id]["algo_state"]
+    state = sessions[x_session_id].get("algo_state")
     num_df = sessions[x_session_id]["df"][state["features"]].fillna(0)
     assignments = np.array(state["assignments"])
+    old_centroids = np.array(state["centroids"])
     new_centroids = [num_df[assignments == i].mean(axis=0).values.tolist() for i in range(state["k"])]
+
+    movement = float(np.linalg.norm(np.array(new_centroids) - old_centroids))
     state["centroids"] = new_centroids
     state["iteration"] += 1
+    state["history"].append({"iter": state["iteration"], "wcss": state["current_wcss"], "movement": movement})
+
     sync_session_to_firebase(x_session_id)
-    return {"status": "success", "new_centroids": new_centroids, "iteration": state["iteration"]}
+    return {"status": "success", "new_centroids": new_centroids, "iteration": state["iteration"], "movement": movement}
+
+@app.post("/stepwise/check-convergence/")
+async def check_convergence(x_session_id: Optional[str] = Header(None)):
+    await ensure_session(x_session_id)
+    state = sessions[x_session_id].get("algo_state")
+    if not state: raise HTTPException(status_code=400, detail="Algo state missing")
+
+    is_converged = False
+    if state["history"]:
+        is_converged = state["history"][-1]["movement"] < 1e-4
+        state["is_converged"] = is_converged
+
+    evaluation = {}
+    if is_converged:
+        evaluation = calculate_cluster_metrics(sessions[x_session_id]["df"], state["features"], np.array(state["assignments"]), state["k"])
+        sessions[x_session_id]["df"]["cluster"] = state["assignments"]
+        sessions[x_session_id]["metrics"] = evaluation
+
+    sync_session_to_firebase(x_session_id)
+    return {"status": "success", "is_converged": is_converged, "iteration": state["iteration"], "history": state["history"], "centroids": state["centroids"], "evaluation": evaluation}
+
+@app.post("/stepwise/auto-converge/")
+async def auto_converge(x_session_id: Optional[str] = Header(None)):
+    await ensure_session(x_session_id)
+    state = sessions[x_session_id].get("algo_state")
+    df = sessions[x_session_id]["df"]
+    features = state["features"]
+    X = df[features].fillna(0).values
+
+    from sklearn.cluster import KMeans
+    model = KMeans(n_clusters=state["k"], init='k-means++', n_init=10, random_state=42).fit(X)
+    state["iteration"] = int(model.n_iter_)
+    state["centroids"] = model.cluster_centers_.tolist()
+    state["assignments"] = model.labels_.tolist()
+    state["is_converged"] = True
+
+    # Simple history for UI
+    state["history"] = [{"iter": i, "wcss": 0.0, "movement": 0.0} for i in range(1, model.n_iter_ + 1)]
+    state["history"][-1]["wcss"] = float(model.inertia_)
+
+    evaluation = calculate_cluster_metrics(df, features, model.labels_, state["k"])
+    df["cluster"] = model.labels_
+    sessions[x_session_id].update({"df": df, "metrics": evaluation})
+
+    sync_session_to_firebase(x_session_id)
+    return {"status": "success", "is_converged": True, "iteration": state["iteration"], "history": state["history"], "centroids": state["centroids"], "evaluation": evaluation}
 
 @app.post("/stepwise/run-kmeans/")
 async def run_kmeans_step(x_session_id: Optional[str] = Header(None), params: Dict[str, Any] = Body({"k": 3})):
@@ -318,11 +369,6 @@ async def run_kmeans_step(x_session_id: Optional[str] = Header(None), params: Di
     sessions[x_session_id].update({"df": df, "metrics": metrics})
     sync_session_to_firebase(x_session_id)
     return {"status": "SUCCESS", "metrics": metrics}
-
-@app.post("/stepwise/auto-converge/")
-async def auto_converge(x_session_id: Optional[str] = Header(None)):
-    await ensure_session(x_session_id)
-    return await run_kmeans_step(x_session_id, {"k": sessions[x_session_id].get("algo_state", {}).get("k", 3)})
 
 @app.get("/stepwise/final-analysis/")
 async def get_final_analysis(x_session_id: Optional[str] = Header(None)):
