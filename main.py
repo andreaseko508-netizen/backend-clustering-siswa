@@ -1268,4 +1268,6 @@ async def export_pdf(x_session_id: Optional[str] = Header(None)):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Hugging Face Spaces requires port 7860
+    port = int(os.environ.get("PORT", 7860))
+    uvicorn.run(app, host="0.0.0.0", port=port)
