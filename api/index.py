@@ -86,20 +86,56 @@ def calculate_cluster_metrics(df, features, assignments, k):
         sil = float(silhouette_score(X, assignments)) if len(unique_labels) > 1 else 0.0
         chi = float(calinski_harabasz_score(X, assignments)) if len(unique_labels) > 1 else 0.0
 
+        # WCSS Calculation
+        wcss = 0.0
+        if len(unique_labels) > 1:
+            for i in range(k):
+                cluster_points = X[assignments == i]
+                if len(cluster_points) > 0:
+                    center = cluster_points.mean().values
+                    wcss += np.sum((cluster_points.values - center)**2)
+
         dist = {str(i): {"count": int(np.sum(assignments == i)), "percentage": float(np.sum(assignments == i) / len(df) * 100)} for i in range(k)}
         profiles = {str(i): df[assignments == i][features].mean(numeric_only=True).to_dict() for i in range(k)}
+
+        # Rigiditas Ilmiah: Penjelasan Matematis & Interpretasi
+        scientific_details = {
+            "silhouette": {
+                "name": "Silhouette Coefficient",
+                "formula": "s = (b - a) / max(a, b)",
+                "description": "Mengukur seberapa mirip sebuah objek dengan clusternya sendiri dibandingkan dengan cluster lain.",
+                "interpretation": "Rentang [-1, 1]. Nilai mendekati 1 menunjukkan pemisahan cluster yang sangat baik.",
+                "value": sil
+            },
+            "dbi": {
+                "name": "Davies-Bouldin Index",
+                "formula": "DB = (1/k) Σ max((Ri + Rj) / dij)",
+                "description": "Rasio jumlah dispersi dalam cluster terhadap jarak antar cluster.",
+                "interpretation": "Semakin kecil nilai DBI (mendekati 0), maka kualitas clustering semakin baik.",
+                "value": dbi
+            },
+            "wcss": {
+                "name": "Within-Cluster Sum of Squares",
+                "formula": "WCSS = Σ Σ ||xi - ci||²",
+                "description": "Total variansi dalam cluster (jarak kuadrat objek ke pusat clusternya).",
+                "interpretation": "Digunakan dalam Elbow Method. Nilai yang lebih kecil menunjukkan cluster yang lebih padat.",
+                "value": wcss
+            }
+        }
 
         return {
             "davies_bouldin_index": dbi,
             "silhouette_score": sil,
             "calinski_harabasz_index": chi,
+            "wcss": wcss,
             "distribution": dist,
             "cluster_profiles": profiles,
+            "scientific_details": scientific_details,
             "dbi": dbi
         }
     except Exception as e:
         print(f"Metrics Error: {e}")
-        return {"davies_bouldin_index": 0.0, "silhouette_score": 0.0, "calinski_harabasz_index": 0.0, "distribution": {}, "cluster_profiles": {}, "dbi": 0.0}
+        return {"davies_bouldin_index": 0.0, "silhouette_score": 0.0, "calinski_harabasz_index": 0.0, "wcss": 0.0, "distribution": {}, "cluster_profiles": {}, "scientific_details": {}, "dbi": 0.0}
 
 # --- ENDPOINTS ---
 
@@ -117,36 +153,62 @@ async def stepwise_upload(file: UploadFile = File(...), x_session_id: Optional[s
     try:
         content = await file.read()
         df = pd.read_csv(io.BytesIO(content)) if file.filename.endswith('.csv') else pd.read_excel(io.BytesIO(content))
+
+        # Rigiditas: Representative data (3 awal, 2 akhir)
+        initial_preview = get_representative_data(df)
+
         sessions[x_session_id] = {
             "df": df,
             "filename": file.filename,
             "config": {"filename": file.filename},
             "metrics": {},
-            "checkpoints": {"Data Asli": df.head(100).to_dict(orient="records")},
+            "checkpoints": {"Data Asli": initial_preview},
             "audit": {"initial_rows": len(df), "initial_cols": len(df.columns), "missing_before": int(df.isnull().sum().sum()), "outliers_removed": 0, "normalization_method": "None", "execution_checklist": []}
         }
         sync_session_to_firebase(x_session_id)
         return {"status": "success", "jumlah_data": len(df), "columns": list(df.columns), "session_id": x_session_id}
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
+def get_representative_data(df):
+    if len(df) <= 5:
+        return df.to_dict(orient="records")
+
+    first_three = df.head(3)
+    last_two = df.tail(2)
+
+    representative = pd.concat([first_three, last_two])
+    return representative.to_dict(orient="records")
+
 @app.get("/stepwise/raw-data/")
 async def get_raw_data(x_session_id: Optional[str] = Header(None)):
     await ensure_session(x_session_id)
     if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
     df = sessions[x_session_id]["df"]
-    return {"columns": list(df.columns), "total_rows": int(len(df)), "data": df.replace([np.inf, -np.inf], np.nan).fillna(0).head(100).to_dict(orient="records")}
+
+    # Rigiditas: Hanya kirim 3 awal, 2 akhir untuk efisiensi & edukasi fleksibel
+    data_tampil = get_representative_data(df)
+
+    return {
+        "columns": list(df.columns),
+        "total_rows": int(len(df)),
+        "data": pd.DataFrame(data_tampil).replace([np.inf, -np.inf], np.nan).fillna(0).to_dict(orient="records"),
+        "is_representative": True,
+        "note": "Menampilkan 3 data pertama dan 2 data terakhir untuk efisiensi visual."
+    }
 
 @app.post("/stepwise/cleaning/")
 async def stepwise_cleaning(x_session_id: Optional[str] = Header(None)):
     await ensure_session(x_session_id)
     if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
     df = sessions[x_session_id]["df"]
-    initial_rows = len(df)
-    sessions[x_session_id]["checkpoints"]["Pembersihan Data (Sebelum)"] = df.head(100).to_dict(orient="records")
+
+    sessions[x_session_id]["checkpoints"]["Pembersihan Data (Sebelum)"] = get_representative_data(df)
+
     df = df.dropna(how='all').dropna(axis=1, how='all').drop_duplicates()
     for col in df.select_dtypes(include=['object']).columns: df[col] = df[col].astype(str).str.strip()
     sessions[x_session_id]["df"] = df
-    sessions[x_session_id]["checkpoints"]["Pembersihan Data (Sesudah)"] = df.head(100).to_dict(orient="records")
+
+    sessions[x_session_id]["checkpoints"]["Pembersihan Data (Sesudah)"] = get_representative_data(df)
     add_to_checklist(x_session_id, "Cleaning")
     sync_session_to_firebase(x_session_id)
     return {"status": "success", "final_rows": len(df), "log": f"Cleaning selesai."}
@@ -156,11 +218,11 @@ async def stepwise_missing(x_session_id: Optional[str] = Header(None)):
     await ensure_session(x_session_id)
     if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
     df = sessions[x_session_id]["df"]
-    sessions[x_session_id]["checkpoints"]["Imputasi Nilai Kosong (Sebelum)"] = df.head(100).to_dict(orient="records")
+    sessions[x_session_id]["checkpoints"]["Imputasi Nilai Kosong (Sebelum)"] = get_representative_data(df)
     num_cols = df.select_dtypes(include=['number']).columns
     for col in num_cols: df[col] = df[col].fillna(df[col].median())
     sessions[x_session_id]["df"] = df
-    sessions[x_session_id]["checkpoints"]["Imputasi Nilai Kosong (Sesudah)"] = df.head(100).to_dict(orient="records")
+    sessions[x_session_id]["checkpoints"]["Imputasi Nilai Kosong (Sesudah)"] = get_representative_data(df)
     add_to_checklist(x_session_id, "Missing Value")
     sync_session_to_firebase(x_session_id)
     return {"status": "success"}
@@ -184,7 +246,7 @@ async def stepwise_outlier(x_session_id: Optional[str] = Header(None)):
     Q1, Q3 = num_df.quantile(0.25), num_df.quantile(0.75)
     IQR = Q3 - Q1
     outliers_mask = ((num_df < (Q1 - 1.5 * IQR)) | (num_df > (Q3 + 1.5 * IQR))).any(axis=1)
-    sessions[x_session_id]["checkpoints"]["Deteksi Outlier (Sesudah)"] = df[~outliers_mask].head(100).to_dict(orient="records")
+    sessions[x_session_id]["checkpoints"]["Deteksi Outlier (Sesudah)"] = get_representative_data(df[~outliers_mask])
     add_to_checklist(x_session_id, "Outlier")
     sync_session_to_firebase(x_session_id)
     return {"status": "success", "outlier_count": int(outliers_mask.sum())}
@@ -202,7 +264,7 @@ async def stepwise_conversion(x_session_id: Optional[str] = Header(None)):
         df[col] = codes
         mapping_details[col] = {str(i): str(val) for i, val in enumerate(uniques)}
     sessions[x_session_id]["df"] = df
-    sessions[x_session_id]["checkpoints"]["Konversi Kategorikal (Sesudah)"] = df.head(100).to_dict(orient="records")
+    sessions[x_session_id]["checkpoints"]["Konversi Kategorikal (Sesudah)"] = get_representative_data(df)
     add_to_checklist(x_session_id, "Conversion")
     sync_session_to_firebase(x_session_id)
     return {"status": "success", "mappings": mapping_details}
@@ -226,7 +288,7 @@ async def stepwise_norm(x_session_id: Optional[str] = Header(None)):
     if len(num_cols) > 0:
         df[num_cols] = MinMaxScaler().fit_transform(df[num_cols])
         sessions[x_session_id]["df"] = df
-        sessions[x_session_id]["checkpoints"]["Normalisasi Min-Max (Sesudah)"] = df.head(100).to_dict(orient="records")
+        sessions[x_session_id]["checkpoints"]["Normalisasi Min-Max (Sesudah)"] = get_representative_data(df)
         add_to_checklist(x_session_id, "Normalization")
         sync_session_to_firebase(x_session_id)
     return {"status": "success"}
@@ -241,7 +303,7 @@ async def stepwise_standard(x_session_id: Optional[str] = Header(None)):
     if len(num_cols) > 0:
         df[num_cols] = StandardScaler().fit_transform(df[num_cols])
         sessions[x_session_id]["df"] = df
-        sessions[x_session_id]["checkpoints"]["Standardisasi Z-Score (Sesudah)"] = df.head(100).to_dict(orient="records")
+        sessions[x_session_id]["checkpoints"]["Standardisasi Z-Score (Sesudah)"] = get_representative_data(df)
         add_to_checklist(x_session_id, "Standardization")
         sync_session_to_firebase(x_session_id)
     return {"status": "success"}
