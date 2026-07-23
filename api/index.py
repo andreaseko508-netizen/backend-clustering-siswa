@@ -18,7 +18,7 @@ base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if base_dir not in sys.path:
     sys.path.append(base_dir)
 
-app = FastAPI(title="SIMORBATAS Python AI Runtime (Vercel)", version="1.5.0")
+app = FastAPI(title="SIMORBATAS Python AI Runtime (Vercel)", version="1.6.0")
 
 # Initialize Firebase Admin SDK
 db = None
@@ -69,8 +69,11 @@ async def ensure_session(x_session_id: str):
 
 def add_to_checklist(x_session_id: str, step_name: str):
     if x_session_id in sessions:
+        if "audit" not in sessions[x_session_id]:
+            sessions[x_session_id]["audit"] = {"execution_checklist": []}
         checklist = sessions[x_session_id]["audit"].get("execution_checklist", [])
-        if step_name not in checklist: checklist.append(step_name)
+        if step_name not in checklist:
+            checklist.append(step_name)
         sessions[x_session_id]["audit"]["execution_checklist"] = checklist
 
 def calculate_cluster_metrics(df, features, assignments, k):
@@ -255,6 +258,8 @@ async def stepwise_elbow(x_session_id: Optional[str] = Header(None)):
     from sklearn.cluster import KMeans
     X = sessions[x_session_id]["df"].select_dtypes(include=[np.number]).fillna(0)
     wcss = [{"k": i, "wcss": float(KMeans(n_clusters=i, init='k-means++', n_init=10, random_state=42).fit(X).inertia_)} for i in range(1, 11)]
+    add_to_checklist(x_session_id, "Elbow Method")
+    sync_session_to_firebase(x_session_id)
     return {"status": "success", "data": wcss}
 
 @app.post("/stepwise/init-centroids/")
@@ -266,6 +271,7 @@ async def init_centroids_step(x_session_id: Optional[str] = Header(None), params
     num_df = df[features].select_dtypes(include=[np.number]).fillna(0).replace([np.inf, -np.inf], 0)
     centroids = num_df.sample(n=k).values.tolist()
     sessions[x_session_id]["algo_state"] = {"iteration": 0, "centroids": centroids, "features": features, "k": k, "history": [], "is_converged": False}
+    add_to_checklist(x_session_id, "Centroid Init")
     sync_session_to_firebase(x_session_id)
     return {"status": "success", "centroids": centroids, "features": features, "message": "Inisialisasi berhasil."}
 
@@ -278,6 +284,7 @@ async def calculate_distances_step(x_session_id: Optional[str] = Header(None)):
     centroids = np.array(state["centroids"])
     distances = [np.linalg.norm(centroids - row.values, axis=1).tolist() for _, row in num_df.iterrows()]
     state["distances"] = distances
+    add_to_checklist(x_session_id, "Euclidean Distance")
     sync_session_to_firebase(x_session_id)
     return {"status": "success", "distance_matrix_sample": distances[:5], "sample_work": {"distances": distances[0]}}
 
@@ -291,6 +298,7 @@ async def assign_clusters_step(x_session_id: Optional[str] = Header(None)):
     state["assignments"] = assignments
     state["current_wcss"] = float(np.sum(np.min(distances, axis=1)**2))
     counts = {str(i): int(np.sum(np.array(assignments) == i)) for i in range(state["k"])}
+    add_to_checklist(x_session_id, "Cluster Assignment")
     sync_session_to_firebase(x_session_id)
     return {"status": "success", "assignments": assignments, "wcss": state["current_wcss"], "counts": counts}
 
@@ -310,6 +318,7 @@ async def update_centroids_step(x_session_id: Optional[str] = Header(None)):
     state["centroids"] = new_centroids
     state["iteration"] += 1
     state["history"].append({"iter": state["iteration"], "wcss": state.get("current_wcss", 0.0), "movement": movement})
+    add_to_checklist(x_session_id, f"Centroid Update #{state['iteration']}")
     sync_session_to_firebase(x_session_id)
     return {"status": "success", "new_centroids": new_centroids, "iteration": state["iteration"], "movement": movement, "sample_work": {"explanation": "Centroid baru dihitung dari rata-rata anggota cluster."}}
 
@@ -318,12 +327,19 @@ async def check_convergence(x_session_id: Optional[str] = Header(None)):
     await ensure_session(x_session_id)
     state = sessions[x_session_id].get("algo_state")
     if not state: raise HTTPException(status_code=400, detail="Algo state missing")
-    is_converged = state["history"][-1]["movement"] < 1e-4 if state["history"] else False
-    state["is_converged"] = is_converged
-    evaluation = calculate_cluster_metrics(sessions[x_session_id]["df"], state["features"], np.array(state["assignments"]), state["k"]) if is_converged else {}
+
+    is_converged = False
+    if state["history"]:
+        is_converged = state["history"][-1]["movement"] < 1e-4
+        state["is_converged"] = is_converged
+
+    evaluation = {}
     if is_converged:
+        evaluation = calculate_cluster_metrics(sessions[x_session_id]["df"], state["features"], np.array(state["assignments"]), state["k"])
         sessions[x_session_id]["df"]["cluster"] = state["assignments"]
         sessions[x_session_id]["metrics"] = evaluation
+        add_to_checklist(x_session_id, "Convergence Reached")
+
     sync_session_to_firebase(x_session_id)
     return {"status": "success", "is_converged": is_converged, "iteration": state["iteration"], "history": state["history"], "centroids": state["centroids"], "evaluation": evaluation}
 
@@ -336,7 +352,6 @@ async def auto_converge(x_session_id: Optional[str] = Header(None)):
     X = df[features].fillna(0).values
 
     # MANUAL K-MEANS LOOP to capture real history for research validation
-    # This prevents the 'all 0.0' issue in Step 18
     centroids = np.array(state["centroids"])
     history = []
     assignments = np.zeros(len(X))
@@ -363,6 +378,7 @@ async def auto_converge(x_session_id: Optional[str] = Header(None)):
     df["cluster"] = assignments.tolist()
     sessions[x_session_id].update({"df": df, "metrics": evaluation})
 
+    add_to_checklist(x_session_id, "Clustering Finalized")
     sync_session_to_firebase(x_session_id)
     return {"status": "success", "is_converged": True, "iteration": state["iteration"], "history": history, "centroids": state["centroids"], "evaluation": evaluation}
 
@@ -377,6 +393,7 @@ async def run_kmeans_step(x_session_id: Optional[str] = Header(None), params: Di
     metrics = calculate_cluster_metrics(df, features, model.labels_, params.get("k", 3))
     metrics.update({"wcss": model.inertia_, "iterations": model.n_iter_, "centroids": model.cluster_centers_.tolist(), "feature_names": features})
     sessions[x_session_id].update({"df": df, "metrics": metrics})
+    add_to_checklist(x_session_id, "K-Means Completed")
     sync_session_to_firebase(x_session_id)
     return {"status": "SUCCESS", "metrics": metrics}
 
