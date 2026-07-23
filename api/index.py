@@ -14,22 +14,13 @@ from firebase_admin import credentials, firestore
 from typing import Optional, List, Dict, Any
 
 # VERCEL COMPATIBILITY: Ensure the current directory and parent are in sys.path
-# This allows 'import sdk...' and 'import plugins...' to work correctly.
 base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if base_dir not in sys.path:
     sys.path.append(base_dir)
 
-# Import SDK models after path adjustment
-try:
-    from sdk.models import ExecutionContext, ExecutionResult
-except ImportError:
-    # Fallback/Dummy for initial build check
-    class ExecutionContext: pass
-    class ExecutionResult: pass
+app = FastAPI(title="SIMORBATAS Python AI Runtime (Vercel)", version="1.2.0")
 
-app = FastAPI(title="SIMORBATAS Python AI Runtime (Vercel)", version="1.1.0")
-
-# Initialize Firebase Admin SDK with Singleton Pattern to prevent Vercel Crash
+# Initialize Firebase Admin SDK
 db = None
 try:
     if not firebase_admin._apps:
@@ -40,7 +31,6 @@ try:
             firebase_admin.initialize_app(cred)
             print("Firebase initialized via Environment Variable.")
         else:
-            # Local development fallback
             cred_path = os.path.join(base_dir, "serviceAccountKey.json")
             if os.path.exists(cred_path):
                 cred = credentials.Certificate(cred_path)
@@ -52,12 +42,10 @@ try:
 except Exception as e:
     print(f"Error initializing Firebase: {e}")
 
-# In-memory session storage (Transient but backed by Firebase)
 sessions: Dict[str, Dict[str, Any]] = {}
 
 def sync_session_to_firebase(session_id: str):
-    if not db or session_id not in sessions:
-        return
+    if not db or session_id not in sessions: return
     try:
         session = sessions[session_id].copy()
         if "df" in session and isinstance(session["df"], pd.DataFrame):
@@ -65,8 +53,7 @@ def sync_session_to_firebase(session_id: str):
             session["df_records"] = df_cleaned.to_dict(orient="records")
             del session["df"]
         db.collection("python_sessions").document(session_id).set(session)
-    except Exception as e:
-        print(f"Failed to sync session {session_id}: {e}")
+    except Exception as e: print(f"Failed to sync: {e}")
 
 async def ensure_session(x_session_id: str):
     if not x_session_id: return
@@ -83,8 +70,7 @@ async def ensure_session(x_session_id: str):
 def add_to_checklist(x_session_id: str, step_name: str):
     if x_session_id in sessions:
         checklist = sessions[x_session_id]["audit"].get("execution_checklist", [])
-        if step_name not in checklist:
-            checklist.append(step_name)
+        if step_name not in checklist: checklist.append(step_name)
         sessions[x_session_id]["audit"]["execution_checklist"] = checklist
 
 def calculate_cluster_metrics(df, features, assignments, k):
@@ -96,24 +82,17 @@ def calculate_cluster_metrics(df, features, assignments, k):
         dist = {str(i): {"count": int(np.sum(assignments == i)), "percentage": float(np.sum(assignments == i) / len(df) * 100)} for i in range(k)}
         profiles = {str(i): df[assignments == i][features].mean(numeric_only=True).to_dict() for i in range(k)}
         return {"davies_bouldin_index": dbi, "silhouette_score": sil, "distribution": dist, "cluster_profiles": profiles}
-    except:
-        return {"davies_bouldin_index": 0.0, "silhouette_score": 0.0, "distribution": {}, "cluster_profiles": {}}
+    except: return {"davies_bouldin_index": 0.0, "silhouette_score": 0.0, "distribution": {}, "cluster_profiles": {}}
 
 # --- ENDPOINTS ---
 
 @app.get("/")
-@app.get("/api")
 async def root():
-    return {
-        "status": "Online",
-        "engine": "SIMORBATAS-Vercel",
-        "message": "Server Riset Clustering Siswa siap melayani aplikasi Android Anda.",
-        "endpoints": ["/health", "/stepwise/upload", "/stepwise/final-analysis"]
-    }
+    return {"status": "Online", "engine": "SIMORBATAS-Vercel", "firebase": "Connected" if db else "Offline"}
 
 @app.get("/health")
 async def health():
-    return {"status": "UP", "engine": "Vercel Serverless Python", "firebase": "Connected" if db else "Offline"}
+    return {"status": "UP", "firebase": "Connected" if db else "Offline"}
 
 @app.post("/stepwise/upload/")
 async def stepwise_upload(file: UploadFile = File(...), x_session_id: Optional[str] = Header(None)):
@@ -121,25 +100,17 @@ async def stepwise_upload(file: UploadFile = File(...), x_session_id: Optional[s
     try:
         content = await file.read()
         df = pd.read_csv(io.BytesIO(content)) if file.filename.endswith('.csv') else pd.read_excel(io.BytesIO(content))
-        sessions[x_session_id] = {
-            "df": df,
-            "filename": file.filename,
-            "config": {},
-            "metrics": {},
-            "checkpoints": {"Data Asli": df.head(100).to_dict(orient="records")},
-            "audit": {"initial_rows": len(df), "initial_cols": len(df.columns), "missing_before": int(df.isnull().sum().sum()), "outliers_removed": 0, "normalization_method": "None", "execution_checklist": []}
-        }
+        sessions[x_session_id] = {"df": df, "filename": file.filename, "config": {}, "metrics": {}, "checkpoints": {"Data Asli": df.head(100).to_dict(orient="records")}, "audit": {"initial_rows": len(df), "initial_cols": len(df.columns), "missing_before": int(df.isnull().sum().sum()), "outliers_removed": 0, "normalization_method": "None", "execution_checklist": []}}
         sync_session_to_firebase(x_session_id)
         return {"status": "success", "jumlah_data": len(df), "columns": list(df.columns), "session_id": x_session_id}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/stepwise/raw-data/")
 async def get_raw_data(x_session_id: Optional[str] = Header(None)):
     await ensure_session(x_session_id)
     if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
     df = sessions[x_session_id]["df"]
-    return {"columns": list(df.columns), "total_rows": int(len(df)), "data": df.replace([np.inf, -np.inf], np.nan).fillna(0).to_dict(orient="records")}
+    return {"columns": list(df.columns), "total_rows": int(len(df)), "data": df.replace([np.inf, -np.inf], np.nan).fillna(0).head(100).to_dict(orient="records")}
 
 @app.post("/stepwise/cleaning/")
 async def stepwise_cleaning(x_session_id: Optional[str] = Header(None)):
@@ -147,28 +118,52 @@ async def stepwise_cleaning(x_session_id: Optional[str] = Header(None)):
     if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
     df = sessions[x_session_id]["df"]
     initial_rows = len(df)
-    sessions[x_session_id]["checkpoints"]["Pembersihan Data (Sebelum)"] = df.to_dict(orient="records")
+    sessions[x_session_id]["checkpoints"]["Pembersihan Data (Sebelum)"] = df.head(100).to_dict(orient="records")
     df = df.dropna(how='all').dropna(axis=1, how='all').drop_duplicates()
     for col in df.select_dtypes(include=['object']).columns: df[col] = df[col].astype(str).str.strip()
     sessions[x_session_id]["df"] = df
-    sessions[x_session_id]["checkpoints"]["Pembersihan Data (Sesudah)"] = df.to_dict(orient="records")
+    sessions[x_session_id]["checkpoints"]["Pembersihan Data (Sesudah)"] = df.head(100).to_dict(orient="records")
     add_to_checklist(x_session_id, "Cleaning")
     sync_session_to_firebase(x_session_id)
-    return {"status": "success", "final_rows": len(df), "log": f"Cleaning selesai: {initial_rows - len(df)} baris dihapus."}
+    return {"status": "success", "final_rows": len(df), "log": f"Cleaning selesai."}
 
 @app.post("/stepwise/missing-value/")
 async def stepwise_missing(x_session_id: Optional[str] = Header(None)):
     await ensure_session(x_session_id)
     if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
     df = sessions[x_session_id]["df"]
-    sessions[x_session_id]["checkpoints"]["Imputasi Nilai Kosong (Sebelum)"] = df.to_dict(orient="records")
+    sessions[x_session_id]["checkpoints"]["Imputasi Nilai Kosong (Sebelum)"] = df.head(100).to_dict(orient="records")
     num_cols = df.select_dtypes(include=['number']).columns
     for col in num_cols: df[col] = df[col].fillna(df[col].median())
     sessions[x_session_id]["df"] = df
-    sessions[x_session_id]["checkpoints"]["Imputasi Nilai Kosong (Sesudah)"] = df.to_dict(orient="records")
+    sessions[x_session_id]["checkpoints"]["Imputasi Nilai Kosong (Sesudah)"] = df.head(100).to_dict(orient="records")
     add_to_checklist(x_session_id, "Missing Value")
     sync_session_to_firebase(x_session_id)
-    return {"status": "success", "log": "Imputasi selesai."}
+    return {"status": "success"}
+
+@app.get("/stepwise/missing-scan")
+async def missing_scan(x_session_id: Optional[str] = Header(None)):
+    await ensure_session(x_session_id)
+    if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
+    df = sessions[x_session_id]["df"]
+    num_cols = df.select_dtypes(include=['number']).columns
+    missing_stats = {col: {"count": int(df[col].isnull().sum()), "median": float(df[col].median())} for col in num_cols if df[col].isnull().sum() > 0}
+    return {"status": "success", "total_missing": int(df.isnull().sum().sum()), "missing_by_column": missing_stats}
+
+@app.post("/stepwise/outlier-detection/")
+async def stepwise_outlier(x_session_id: Optional[str] = Header(None)):
+    await ensure_session(x_session_id)
+    if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
+    df = sessions[x_session_id]["df"]
+    features = sessions[x_session_id]["config"].get("features", list(df.select_dtypes(include=['number']).columns))
+    num_df = df[features].select_dtypes(include=['number'])
+    Q1, Q3 = num_df.quantile(0.25), num_df.quantile(0.75)
+    IQR = Q3 - Q1
+    outliers_mask = ((num_df < (Q1 - 1.5 * IQR)) | (num_df > (Q3 + 1.5 * IQR))).any(axis=1)
+    sessions[x_session_id]["checkpoints"]["Deteksi Outlier (Sesudah)"] = df[~outliers_mask].head(100).to_dict(orient="records")
+    add_to_checklist(x_session_id, "Outlier")
+    sync_session_to_firebase(x_session_id)
+    return {"status": "success", "outlier_count": int(outliers_mask.sum())}
 
 @app.post("/stepwise/conversion/")
 async def stepwise_conversion(x_session_id: Optional[str] = Header(None)):
@@ -183,84 +178,58 @@ async def stepwise_conversion(x_session_id: Optional[str] = Header(None)):
         df[col] = codes
         mapping_details[col] = {str(i): str(val) for i, val in enumerate(uniques)}
     sessions[x_session_id]["df"] = df
-    sessions[x_session_id]["checkpoints"]["Konversi Kategorikal (Sesudah)"] = df.to_dict(orient="records")
+    sessions[x_session_id]["checkpoints"]["Konversi Kategorikal (Sesudah)"] = df.head(100).to_dict(orient="records")
     add_to_checklist(x_session_id, "Conversion")
     sync_session_to_firebase(x_session_id)
     return {"status": "success", "mappings": mapping_details}
 
+@app.get("/stepwise/normalization-stats/")
+async def get_norm_stats(x_session_id: Optional[str] = Header(None)):
+    await ensure_session(x_session_id)
+    if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
+    df = sessions[x_session_id]["df"]
+    num_df = df.select_dtypes(include=['number'])
+    stats = {col: {"min": float(num_df[col].min()), "max": float(num_df[col].max()), "mean": float(num_df[col].mean())} for col in num_df.columns}
+    return {"status": "success", "stats": stats}
+
 @app.post("/stepwise/normalization/")
 async def stepwise_norm(x_session_id: Optional[str] = Header(None)):
     await ensure_session(x_session_id)
-    from sklearn.preprocessing import MinMaxScaler
     if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
+    from sklearn.preprocessing import MinMaxScaler
     df = sessions[x_session_id]["df"]
     num_cols = df.select_dtypes(include=['number']).columns
     if len(num_cols) > 0:
-        scaler = MinMaxScaler()
-        df[num_cols] = scaler.fit_transform(df[num_cols])
+        df[num_cols] = MinMaxScaler().fit_transform(df[num_cols])
         sessions[x_session_id]["df"] = df
-        sessions[x_session_id]["checkpoints"]["Normalisasi Min-Max (Sesudah)"] = df.to_dict(orient="records")
+        sessions[x_session_id]["checkpoints"]["Normalisasi Min-Max (Sesudah)"] = df.head(100).to_dict(orient="records")
         add_to_checklist(x_session_id, "Normalization")
         sync_session_to_firebase(x_session_id)
     return {"status": "success"}
 
-@app.post("/stepwise/save_config/")
-@app.post("/stepwise/mapping-config/")
-async def stepwise_mapping(x_session_id: Optional[str] = Header(None), config: Dict[str, Any] = Body(...)):
+@app.post("/stepwise/standardization/")
+async def stepwise_standard(x_session_id: Optional[str] = Header(None)):
     await ensure_session(x_session_id)
     if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
-    sessions[x_session_id]["config"].update(config)
-    sync_session_to_firebase(x_session_id)
+    from sklearn.preprocessing import StandardScaler
+    df = sessions[x_session_id]["df"]
+    num_cols = df.select_dtypes(include=['number']).columns
+    if len(num_cols) > 0:
+        df[num_cols] = StandardScaler().fit_transform(df[num_cols])
+        sessions[x_session_id]["df"] = df
+        sessions[x_session_id]["checkpoints"]["Standardisasi Z-Score (Sesudah)"] = df.head(100).to_dict(orient="records")
+        add_to_checklist(x_session_id, "Standardization")
+        sync_session_to_firebase(x_session_id)
     return {"status": "success"}
 
-@app.post("/stepwise/run-kmeans/")
-async def run_kmeans_step(x_session_id: Optional[str] = Header(None), params: Dict[str, Any] = Body({"k": 3})):
-    await ensure_session(x_session_id)
-    if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
-    from sklearn.cluster import KMeans
-    df = sessions[x_session_id]["df"]
-    features = sessions[x_session_id]["config"].get("features", [])
-    if not features: features = list(df.select_dtypes(include=[np.number]).columns)
-    X = df[features].select_dtypes(include=[np.number]).fillna(0)
-    k = params.get("k", 3)
-    model = KMeans(n_clusters=k, init='k-means++', random_state=42, n_init=10)
-    clusters = model.fit_predict(X)
-    df['cluster'] = clusters
-    for i in range(k):
-        df[f"dist_c{i}"] = np.linalg.norm(X.values - model.cluster_centers_[i], axis=1)
-
-    metrics = calculate_cluster_metrics(df, features, clusters, k)
-    metrics["wcss"] = float(model.inertia_)
-    metrics["iterations"] = int(model.n_iter_)
-    metrics["centroids"] = model.cluster_centers_.tolist()
-    metrics["feature_names"] = list(features)
-
-    sessions[x_session_id]["df"] = df
-    sessions[x_session_id]["metrics"] = metrics
-    sessions[x_session_id]["checkpoints"]["Hasil Akhir"] = df.head(100).to_dict(orient="records")
-    sync_session_to_firebase(x_session_id)
-    return {"status": "SUCCESS", "metrics": metrics}
-
-@app.get("/stepwise/final-analysis/")
-async def get_final_analysis(x_session_id: Optional[str] = Header(None)):
+@app.get("/stepwise/quality-report/")
+async def get_quality_report(x_session_id: Optional[str] = Header(None)):
     await ensure_session(x_session_id)
     if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
     session = sessions[x_session_id]
-    metrics = session.get("metrics", {})
-    return {
-        "status": "success",
-        "jumlah_data": len(session["df"]),
-        "metrics": metrics,
-        "silhouette_score": metrics.get("silhouette_score", 0.0),
-        "davies_bouldin_index": metrics.get("davies_bouldin_index", 0.0),
-        "wcss": metrics.get("wcss", 0.0),
-        "iterations": metrics.get("iterations", 0),
-        "cluster_distribution": metrics.get("distribution", {}),
-        "cluster_profiles": metrics.get("cluster_profiles", {}),
-        "centroids": metrics.get("centroids", []),
-        "feature_names": metrics.get("feature_names", []),
-        "hasil_cluster": session["df"].to_dict(orient="records")
-    }
+    df = session["df"]
+    num_cols = list(df.select_dtypes(include=['number']).columns)
+    return {"status": "success", "rows": len(df), "cols": len(df.columns), "numeric_features": len(num_cols), "completeness": 1.0 - (df.isnull().sum().sum() / df.size if df.size > 0 else 0), "is_suitable": len(df) > 0 and len(num_cols) >= 2, "execution_checklist": session["audit"].get("execution_checklist", [])}
 
 @app.get("/stepwise/checkpoints/")
 async def get_checkpoints(x_session_id: Optional[str] = Header(None)):
@@ -268,22 +237,120 @@ async def get_checkpoints(x_session_id: Optional[str] = Header(None)):
     if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
     return {"status": "success", "checkpoints": sessions[x_session_id].get("checkpoints", {})}
 
+@app.get("/stepwise/universal-dataset/")
+async def get_universal_dataset(x_session_id: Optional[str] = Header(None)):
+    await ensure_session(x_session_id)
+    if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
+    return {"columns": list(sessions[x_session_id]["df"].columns), "data": sessions[x_session_id]["df"].head(500).to_dict(orient="records")}
+
+@app.get("/stepwise/session-state/")
+async def get_session_state(x_session_id: Optional[str] = Header(None)):
+    await ensure_session(x_session_id)
+    return {"state": "UPLOADED" if x_session_id in sessions else "IDLE"}
+
+@app.post("/stepwise/elbow/")
+async def stepwise_elbow(x_session_id: Optional[str] = Header(None)):
+    await ensure_session(x_session_id)
+    if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
+    from sklearn.cluster import KMeans
+    X = sessions[x_session_id]["df"].select_dtypes(include=[np.number]).fillna(0)
+    wcss = [{"k": i, "wcss": float(KMeans(n_clusters=i, init='k-means++', n_init=10, random_state=42).fit(X).inertia_)} for i in range(1, 11)]
+    return {"status": "success", "data": wcss}
+
+@app.post("/stepwise/init-centroids/")
+async def init_centroids_step(x_session_id: Optional[str] = Header(None), params: Dict[str, Any] = Body({"k": 3, "init_method": "random"})):
+    await ensure_session(x_session_id)
+    if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
+    df, k = sessions[x_session_id]["df"], params.get("k", 3)
+    features = sessions[x_session_id]["config"].get("features", list(df.select_dtypes(include=[np.number]).columns))
+    num_df = df[features].select_dtypes(include=[np.number]).fillna(0).replace([np.inf, -np.inf], 0)
+    centroids = num_df.sample(n=k).values.tolist()
+    sessions[x_session_id]["algo_state"] = {"iteration": 0, "centroids": centroids, "features": features, "k": k, "history": []}
+    sync_session_to_firebase(x_session_id)
+    return {"status": "success", "centroids": centroids, "features": features}
+
+@app.post("/stepwise/calculate-distances/")
+async def calculate_distances_step(x_session_id: Optional[str] = Header(None)):
+    await ensure_session(x_session_id)
+    state = sessions[x_session_id].get("algo_state")
+    if not state: raise HTTPException(status_code=400, detail="Algo state missing")
+    num_df = sessions[x_session_id]["df"][state["features"]].select_dtypes(include=[np.number]).fillna(0)
+    centroids = np.array(state["centroids"])
+    distances = [np.linalg.norm(centroids - row.values, axis=1).tolist() for _, row in num_df.iterrows()]
+    state["distances"] = distances
+    sync_session_to_firebase(x_session_id)
+    return {"status": "success", "distance_matrix_sample": distances[:5]}
+
+@app.post("/stepwise/assign-clusters/")
+async def assign_clusters_step(x_session_id: Optional[str] = Header(None)):
+    await ensure_session(x_session_id)
+    state = sessions[x_session_id].get("algo_state")
+    distances = np.array(state["distances"])
+    assignments = np.argmin(distances, axis=1).tolist()
+    state["assignments"] = assignments
+    state["current_wcss"] = float(np.sum(np.min(distances, axis=1)**2))
+    sync_session_to_firebase(x_session_id)
+    return {"status": "success", "assignments": assignments, "wcss": state["current_wcss"]}
+
+@app.post("/stepwise/update-centroids/")
+async def update_centroids_step(x_session_id: Optional[str] = Header(None)):
+    await ensure_session(x_session_id)
+    state = sessions[x_session_id]["algo_state"]
+    num_df = sessions[x_session_id]["df"][state["features"]].fillna(0)
+    assignments = np.array(state["assignments"])
+    new_centroids = [num_df[assignments == i].mean(axis=0).values.tolist() for i in range(state["k"])]
+    state["centroids"] = new_centroids
+    state["iteration"] += 1
+    sync_session_to_firebase(x_session_id)
+    return {"status": "success", "new_centroids": new_centroids, "iteration": state["iteration"]}
+
+@app.post("/stepwise/run-kmeans/")
+async def run_kmeans_step(x_session_id: Optional[str] = Header(None), params: Dict[str, Any] = Body({"k": 3})):
+    await ensure_session(x_session_id)
+    from sklearn.cluster import KMeans
+    df = sessions[x_session_id]["df"]
+    features = sessions[x_session_id]["config"].get("features", list(df.select_dtypes(include=[np.number]).columns))
+    X = df[features].fillna(0)
+    model = KMeans(n_clusters=params.get("k", 3), n_init=10, random_state=42).fit(X)
+    df['cluster'] = model.labels_
+    metrics = calculate_cluster_metrics(df, features, model.labels_, params.get("k", 3))
+    metrics.update({"wcss": model.inertia_, "iterations": model.n_iter_, "centroids": model.cluster_centers_.tolist(), "feature_names": features})
+    sessions[x_session_id].update({"df": df, "metrics": metrics})
+    sync_session_to_firebase(x_session_id)
+    return {"status": "SUCCESS", "metrics": metrics}
+
+@app.post("/stepwise/auto-converge/")
+async def auto_converge(x_session_id: Optional[str] = Header(None)):
+    await ensure_session(x_session_id)
+    return await run_kmeans_step(x_session_id, {"k": sessions[x_session_id].get("algo_state", {}).get("k", 3)})
+
+@app.get("/stepwise/final-analysis/")
+async def get_final_analysis(x_session_id: Optional[str] = Header(None)):
+    await ensure_session(x_session_id)
+    session = sessions[x_session_id]
+    metrics = session.get("metrics", {})
+    return {"status": "success", "jumlah_data": len(session["df"]), "metrics": metrics, "silhouette_score": metrics.get("silhouette_score", 0.0), "davies_bouldin_index": metrics.get("davies_bouldin_index", 0.0), "wcss": metrics.get("wcss", 0.0), "iterations": metrics.get("iterations", 0), "cluster_distribution": metrics.get("distribution", {}), "cluster_profiles": metrics.get("cluster_profiles", {}), "centroids": metrics.get("centroids", []), "feature_names": metrics.get("feature_names", []), "hasil_cluster": session["df"].to_dict(orient="records")}
+
+@app.post("/stepwise/save_config/")
+@app.post("/stepwise/mapping-config/")
+async def stepwise_mapping(x_session_id: Optional[str] = Header(None), config: Dict[str, Any] = Body(...)):
+    await ensure_session(x_session_id)
+    sessions[x_session_id]["config"].update(config)
+    sync_session_to_firebase(x_session_id)
+    return {"status": "success"}
+
 @app.get("/stepwise/export-excel/")
 async def export_excel(x_session_id: Optional[str] = Header(None)):
     await ensure_session(x_session_id)
-    if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
     session = sessions[x_session_id]
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        checkpoints = session.get("checkpoints", {})
-        for name, data in checkpoints.items():
-             if data: pd.DataFrame(data).to_excel(writer, sheet_name=name[:30], index=False)
-        if "df" in session: session["df"].to_excel(writer, sheet_name="Hasil Akhir Final", index=False)
+        for name, data in session.get("checkpoints", {}).items():
+            if data: pd.DataFrame(data).to_excel(writer, sheet_name=name[:31], index=False)
+        session["df"].to_excel(writer, sheet_name="Hasil Akhir", index=False)
     output.seek(0)
-    return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f"attachment; filename=Laporan_Riset_{x_session_id[:8]}.xlsx"})
+    return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f"attachment; filename=Riset_{x_session_id[:8]}.xlsx"})
 
-# Vercel entry point
-# No if __name__ == "__main__" needed for serverless, but kept for compatibility
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=7860)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 7860)))
