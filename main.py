@@ -47,6 +47,24 @@ except Exception as e:
 # Structure: { session_id: { "df": DataFrame, "config": {}, "metrics": {}, "audit": {}, "algo_state": {} } }
 sessions: Dict[str, Dict[str, Any]] = {}
 
+def get_preview_data(df: pd.DataFrame):
+    """Returns the first 3 and last 2 rows of a DataFrame as a list of dicts."""
+    if len(df) <= 5:
+        return df.to_dict(orient="records")
+
+    first_3 = df.head(3)
+    last_2 = df.tail(2)
+    preview = pd.concat([first_3, last_2])
+    return preview.to_dict(orient="records")
+
+def get_preview_list(data: list):
+    """Returns the first 3 and last 2 items of a list."""
+    if data is None or not isinstance(data, list):
+        return data
+    if len(data) <= 5:
+        return data
+    return data[:3] + data[-2:]
+
 def sync_session_to_firebase(session_id: str):
     """Saves the current session state to Firestore for cloud persistence."""
     if not db or session_id not in sessions:
@@ -181,7 +199,7 @@ async def stepwise_upload(
             "config": {},
             "metrics": {},
             "checkpoints": {
-                "Data Asli": df.head(100).to_dict(orient="records")
+                "Data Asli": df.to_dict(orient="records")
             },
             "audit": {
                 "initial_rows": len(df),
@@ -230,7 +248,7 @@ async def stepwise_cleaning(x_session_id: Optional[str] = Header(None)):
     initial_rows = len(df)
 
     # Store Before State for Sinta 2 Educational Comparison
-    sessions[x_session_id]["checkpoints"]["Pembersihan Data (Sebelum)"] = df.to_dict(orient="records")
+    sessions[x_session_id]["checkpoints"]["Data Cleansing (Sebelum)"] = df.to_dict(orient="records")
 
     # 1. Drop completely empty rows and columns
     df = df.dropna(how='all').dropna(axis=1, how='all')
@@ -246,7 +264,7 @@ async def stepwise_cleaning(x_session_id: Optional[str] = Header(None)):
     final_rows = len(df)
 
     sessions[x_session_id]["df"] = df
-    sessions[x_session_id]["checkpoints"]["Pembersihan Data (Sesudah)"] = df.to_dict(orient="records")
+    sessions[x_session_id]["checkpoints"]["Data Cleansing (Sesudah)"] = df.to_dict(orient="records")
     add_to_checklist(x_session_id, "Cleaning")
     sync_session_to_firebase(x_session_id)
 
@@ -277,7 +295,7 @@ async def stepwise_missing(x_session_id: Optional[str] = Header(None)):
     df = sessions[x_session_id]["df"]
 
     # Store Before State
-    sessions[x_session_id]["checkpoints"]["Imputasi Nilai Kosong (Sebelum)"] = df.to_dict(orient="records")
+    sessions[x_session_id]["checkpoints"]["Data Missing Value (Sebelum)"] = df.to_dict(orient="records")
 
     num_cols = df.select_dtypes(include=['number']).columns
     initial_missing = int(df[num_cols].isnull().sum().sum())
@@ -288,7 +306,7 @@ async def stepwise_missing(x_session_id: Optional[str] = Header(None)):
             df[col] = df[col].fillna(df[col].median())
 
     sessions[x_session_id]["df"] = df
-    sessions[x_session_id]["checkpoints"]["Imputasi Nilai Kosong (Sesudah)"] = df.to_dict(orient="records")
+    sessions[x_session_id]["checkpoints"]["Data Missing Value (Sesudah)"] = df.to_dict(orient="records")
     add_to_checklist(x_session_id, "Missing Value")
     sync_session_to_firebase(x_session_id)
 
@@ -407,7 +425,7 @@ async def run_kmeans_step(
         sessions[x_session_id]["checkpoints"]["Jarak Euclidean"] = cl_check.get("Jarak Euclidean Awal")
         sessions[x_session_id]["checkpoints"]["Pembagian Cluster"] = cl_check.get("Pembagian Cluster Awal")
         sessions[x_session_id]["checkpoints"]["Histori Iterasi"] = result.metrics.get("iteration_history")
-        sessions[x_session_id]["checkpoints"]["Hasil Akhir"] = result_df.head(100).to_dict(orient="records")
+        sessions[x_session_id]["checkpoints"]["Hasil Akhir"] = result_df.to_dict(orient="records")
 
         if "centroids" in result.metrics:
             sessions[x_session_id]["checkpoints"]["Centroid Akhir"] = result.metrics["centroids"]
@@ -465,7 +483,7 @@ async def stepwise_outlier(x_session_id: Optional[str] = Header(None)):
     df = sessions[x_session_id]["df"]
 
     # Store Before
-    sessions[x_session_id]["checkpoints"]["Deteksi Outlier (Sebelum)"] = df.to_dict(orient="records")
+    sessions[x_session_id]["checkpoints"]["Data Cleansing (Sebelum)"] = df.to_dict(orient="records")
 
     config = sessions[x_session_id].get("config", {})
     features = config.get("features", [])
@@ -485,7 +503,7 @@ async def stepwise_outlier(x_session_id: Optional[str] = Header(None)):
     # But for before/after comparison in UI, we might want to show what WOULD be removed
     df_after = df[~outliers_mask]
 
-    sessions[x_session_id]["checkpoints"]["Deteksi Outlier (Sesudah)"] = df_after.to_dict(orient="records")
+    sessions[x_session_id]["checkpoints"]["Data Cleansing (Sesudah)"] = df_after.to_dict(orient="records")
     sessions[x_session_id]["audit"]["outliers_removed"] += outlier_count
     add_to_checklist(x_session_id, "Outlier")
     sync_session_to_firebase(x_session_id)
@@ -527,7 +545,7 @@ async def stepwise_norm(x_session_id: Optional[str] = Header(None)):
     df = sessions[x_session_id]["df"]
 
     # Store Before State
-    sessions[x_session_id]["checkpoints"]["Normalisasi Min-Max (Sebelum)"] = df.to_dict(orient="records")
+    sessions[x_session_id]["checkpoints"]["Data Normalisasi (Sebelum)"] = df.to_dict(orient="records")
 
     num_cols = df.select_dtypes(include=['number']).columns
 
@@ -540,7 +558,7 @@ async def stepwise_norm(x_session_id: Optional[str] = Header(None)):
         scaler = MinMaxScaler()
         df[num_cols] = scaler.fit_transform(df[num_cols])
         sessions[x_session_id]["df"] = df
-        sessions[x_session_id]["checkpoints"]["Normalisasi Min-Max (Sesudah)"] = df.to_dict(orient="records")
+        sessions[x_session_id]["checkpoints"]["Data Normalisasi (Sesudah)"] = df.to_dict(orient="records")
         sessions[x_session_id]["audit"]["normalization_method"] = "Min-Max"
         add_to_checklist(x_session_id, "Normalization")
         sync_session_to_firebase(x_session_id)
@@ -602,7 +620,7 @@ async def stepwise_conversion(x_session_id: Optional[str] = Header(None)):
     df = sessions[x_session_id]["df"]
 
     # Store Before State for Sinta 2 Educational Comparison
-    sessions[x_session_id]["checkpoints"]["Konversi Kategorikal (Sebelum)"] = df.to_dict(orient="records")
+    sessions[x_session_id]["checkpoints"]["Data Konversi (Sebelum)"] = df.to_dict(orient="records")
 
     config = sessions[x_session_id].get("config", {})
     features = config.get("features", [])
@@ -643,7 +661,7 @@ async def stepwise_conversion(x_session_id: Optional[str] = Header(None)):
 
     sessions[x_session_id]["df"] = df
     sessions[x_session_id]["conversion_mapping"] = mapping_details
-    sessions[x_session_id]["checkpoints"]["Konversi Kategorikal (Sesudah)"] = df.to_dict(orient="records")
+    sessions[x_session_id]["checkpoints"]["Data Konversi (Sesudah)"] = df.to_dict(orient="records")
     add_to_checklist(x_session_id, "Conversion")
     sync_session_to_firebase(x_session_id)
 
@@ -680,7 +698,7 @@ async def stepwise_standard(x_session_id: Optional[str] = Header(None)):
     df = sessions[x_session_id]["df"]
 
     # Store Before State
-    sessions[x_session_id]["checkpoints"]["Standardisasi Z-Score (Sebelum)"] = df.to_dict(orient="records")
+    sessions[x_session_id]["checkpoints"]["Data Normalisasi (Sebelum)"] = df.to_dict(orient="records")
 
     num_cols = df.select_dtypes(include=['number']).columns
 
@@ -696,7 +714,7 @@ async def stepwise_standard(x_session_id: Optional[str] = Header(None)):
         df[num_cols] = np.nan_to_num(transformed)
 
         sessions[x_session_id]["df"] = df
-        sessions[x_session_id]["checkpoints"]["Standardisasi Z-Score (Sesudah)"] = df.to_dict(orient="records")
+        sessions[x_session_id]["checkpoints"]["Data Normalisasi (Sesudah)"] = df.to_dict(orient="records")
         sessions[x_session_id]["audit"]["normalization_method"] = "Z-Score"
         add_to_checklist(x_session_id, "Standardization")
         sync_session_to_firebase(x_session_id)
@@ -808,9 +826,28 @@ async def get_checkpoints(x_session_id: Optional[str] = Header(None)):
         print(f"ERROR: Session {x_session_id} not found. Available: {list(sessions.keys())}")
         raise HTTPException(status_code=404, detail=f"Session {x_session_id} not found")
 
+    full_checkpoints = sessions[x_session_id].get("checkpoints", {})
+    preview_checkpoints = {}
+
+    # Define steps that should be sliced for the 3+2 rule (Student Data steps)
+    student_data_steps = [
+        "Data Asli",
+        "Data Konversi (Sebelum)", "Data Konversi (Sesudah)",
+        "Data Cleansing (Sebelum)", "Data Cleansing (Sesudah)",
+        "Data Missing Value (Sebelum)", "Data Missing Value (Sesudah)",
+        "Data Normalisasi (Sebelum)", "Data Normalisasi (Sesudah)",
+        "Jarak Euclidean", "Pembagian Cluster", "Hasil Akhir"
+    ]
+
+    for key, value in full_checkpoints.items():
+        if key in student_data_steps:
+            preview_checkpoints[key] = get_preview_list(value)
+        else:
+            preview_checkpoints[key] = value
+
     return {
         "status": "success",
-        "checkpoints": sessions[x_session_id].get("checkpoints", {})
+        "checkpoints": preview_checkpoints
     }
 
 @app.get("/stepwise/universal-dataset/")
@@ -1183,24 +1220,20 @@ async def export_excel(x_session_id: Optional[str] = Header(None)):
             pd.DataFrame(checkpoints["Data Asli"]).to_excel(writer, sheet_name="1. Data Asli", index=False)
 
         # 2. Data Konversi
-        if "Konversi Kategorikal (Sesudah)" in checkpoints:
-            pd.DataFrame(checkpoints["Konversi Kategorikal (Sesudah)"]).to_excel(writer, sheet_name="2. Data Konversi", index=False)
+        if "Data Konversi (Sesudah)" in checkpoints:
+            pd.DataFrame(checkpoints["Data Konversi (Sesudah)"]).to_excel(writer, sheet_name="2. Data Konversi", index=False)
 
         # 3. Data Cleansing
-        if "Pembersihan Data (Sesudah)" in checkpoints:
-            pd.DataFrame(checkpoints["Pembersihan Data (Sesudah)"]).to_excel(writer, sheet_name="3. Data Cleansing", index=False)
-        elif "Deteksi Outlier (Sesudah)" in checkpoints:
-            pd.DataFrame(checkpoints["Deteksi Outlier (Sesudah)"]).to_excel(writer, sheet_name="3. Data Cleansing", index=False)
+        if "Data Cleansing (Sesudah)" in checkpoints:
+            pd.DataFrame(checkpoints["Data Cleansing (Sesudah)"]).to_excel(writer, sheet_name="3. Data Cleansing", index=False)
 
         # 4. Data Missing Value
-        if "Imputasi Nilai Kosong (Sesudah)" in checkpoints:
-            pd.DataFrame(checkpoints["Imputasi Nilai Kosong (Sesudah)"]).to_excel(writer, sheet_name="4. Data Missing Value", index=False)
+        if "Data Missing Value (Sesudah)" in checkpoints:
+            pd.DataFrame(checkpoints["Data Missing Value (Sesudah)"]).to_excel(writer, sheet_name="4. Data Missing Value", index=False)
 
         # 5. Data Normalisasi
-        if "Normalisasi Min-Max (Sesudah)" in checkpoints:
-            pd.DataFrame(checkpoints["Normalisasi Min-Max (Sesudah)"]).to_excel(writer, sheet_name="5. Data Normalisasi", index=False)
-        elif "Standardisasi Z-Score (Sesudah)" in checkpoints:
-            pd.DataFrame(checkpoints["Standardisasi Z-Score (Sesudah)"]).to_excel(writer, sheet_name="5. Data Normalisasi", index=False)
+        if "Data Normalisasi (Sesudah)" in checkpoints:
+            pd.DataFrame(checkpoints["Data Normalisasi (Sesudah)"]).to_excel(writer, sheet_name="5. Data Normalisasi", index=False)
 
         # 6. Metode Elbow
         if "Metode Elbow" in checkpoints:
