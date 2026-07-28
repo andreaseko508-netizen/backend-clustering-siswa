@@ -127,18 +127,24 @@ class KMeansPlugin(BaseResearchPlugin):
             start_time = time.time()
             data_values = X.values
 
-            best_wcss = float('inf')
+            best_dbi = float('inf')
             best_labels = None
             best_centroids = None
             best_dists = None
             best_history = None
+            best_wcss = float('inf')
 
-            # Multi-Restart Optimization Loop
+            # Multi-Restart Optimization Loop (DBI-Driven for S2 Standard)
             for _ in range(n_init):
                 init_centroids = self._kmeans_plus_plus(data_values, n_clusters, weights)
                 labels, centroids, dists, history, wcss = self._run_single_kmeans(data_values, n_clusters, max_iter, weights, init_centroids)
 
-                if wcss < best_wcss:
+                # Calculate DBI for this specific run
+                current_dbi = float(davies_bouldin_score(data_values, labels))
+
+                # Optimization Strategy: Choose result with Lowest DBI (Sharper Separation)
+                if current_dbi < best_dbi:
+                    best_dbi = current_dbi
                     best_wcss = wcss
                     best_labels = labels
                     best_centroids = centroids
@@ -147,14 +153,13 @@ class KMeansPlugin(BaseResearchPlugin):
 
             end_time = time.time()
 
-            # Scientific Evaluation Metrics
+            # Final Evaluation of the Best DBI Run
             sil = float(silhouette_score(data_values, best_labels))
-            dbi = float(davies_bouldin_score(data_values, best_labels))
             chi = float(calinski_harabasz_score(data_values, best_labels))
 
             metrics = {
                 "silhouette_score": sil,
-                "davies_bouldin_index": dbi,
+                "davies_bouldin_index": best_dbi,
                 "calinski_harabasz_index": chi,
                 "wcss": best_wcss,
                 "n_clusters": n_clusters,
@@ -165,7 +170,8 @@ class KMeansPlugin(BaseResearchPlugin):
                 "cluster_profiles": {str(j): X[best_labels == j].mean().to_dict() for j in range(n_clusters)},
                 "iteration_history": best_history,
                 "initialization_strategy": "kmeans++",
-                "multi_init_count": n_init
+                "multi_init_count": n_init,
+                "optimization_objective": "DBI Minimalization"
             }
 
             # Prepare Artifacts
