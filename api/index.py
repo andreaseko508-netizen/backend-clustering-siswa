@@ -403,7 +403,90 @@ async def fcm_init_step(x_session_id: Optional[str] = Header(None), params: Dict
 
     add_to_checklist(x_session_id, "FCM Matrix Init")
     sync_session_to_firebase(x_session_id)
-    return {"status": "success", "message": f"Matriks keanggotaan fuzzy (k={k}, m={m}) berhasil diinisialisasi."}
+
+    # Sample work for Step 14
+    sample_work = {
+        "explanation": "Matriks U diinisialisasi secara acak menggunakan Distribusi Dirichlet untuk menjamin total probabilitas keanggotaan per baris adalah 1.0.",
+        "sample_u": U[:, 0].tolist(),
+        "formula": "U^{(0)} = [\\mu_{ij}] \\in [0, 1]"
+    }
+
+    return {
+        "status": "success",
+        "message": f"Matriks keanggotaan fuzzy (k={k}, m={m}) berhasil diinisialisasi.",
+        "sample_work": sample_work
+    }
+
+@app.post("/stepwise/fcm-calculate-centers/")
+async def fcm_calc_centers_step(x_session_id: Optional[str] = Header(None)):
+    await ensure_session(x_session_id)
+    state = sessions[x_session_id].get("algo_state")
+    if not state or state.get("mode") != "fcm": raise HTTPException(status_code=400, detail="FCM state missing")
+
+    X = np.array(state["X"])
+    U = np.array(state["U"])
+    m = state["m"]
+
+    # Formula: v_j = sum( u_ij^m * x_i ) / sum( u_ij^m )
+    U_m = U ** m
+    numerator = U_m @ X # k x n_features
+    denominator = U_m.sum(axis=1)[:, np.newaxis] # k x 1
+    centers = numerator / denominator
+
+    state["centroids"] = centers.tolist()
+
+    # Sample work for Step 15
+    sample_work = {
+        "explanation": f"Pusat klaster (Centroid) dihitung sebagai rata-rata terbobot dari seluruh data menggunakan pangkat m={m} dari matriks keanggotaan.",
+        "formula": "v_j = \\frac{\\sum_{i=1}^n \\mu_{ij}^m x_i}{\\sum_{i=1}^n \\mu_{ij}^m}",
+        "sample_v": centers[0].tolist()
+    }
+
+    add_to_checklist(x_session_id, "FCM Center Update")
+    sync_session_to_firebase(x_session_id)
+    return {"status": "success", "centroids": centers.tolist(), "sample_work": sample_work}
+
+@app.post("/stepwise/fcm-update-membership/")
+async def fcm_update_u_step(x_session_id: Optional[str] = Header(None)):
+    await ensure_session(x_session_id)
+    state = sessions[x_session_id].get("algo_state")
+    if not state or "centroids" not in state: raise HTTPException(status_code=400, detail="FCM centers not calculated")
+
+    X = np.array(state["X"])
+    U_old = np.array(state["U"])
+    centers = np.array(state["centroids"])
+    m = state["m"]
+    k = state["k"]
+
+    dists = np.linalg.norm(X[:, np.newaxis] - centers, axis=2)
+    dists = np.fmax(dists, 1e-10)
+
+    power = 2.0 / (m - 1)
+    new_U = np.zeros((X.shape[0], k))
+
+    for i in range(X.shape[0]):
+        for j in range(k):
+            denominator = np.sum((dists[i, j] / dists[i, :]) ** power)
+            new_U[i, j] = 1.0 / denominator
+
+    new_U = new_U.T
+    diff = np.linalg.norm(new_U - U_old)
+
+    state["U"] = new_U.tolist()
+    state["iteration"] += 1
+    state["history"].append({"iter": state["iteration"], "diff": float(diff)})
+
+    # Sample work for Step 16
+    sample_work = {
+        "explanation": "Derajat keanggotaan diperbarui berdasarkan rasio jarak relatif subjek terhadap seluruh pusat klaster.",
+        "formula": "\\mu_{ij} = [\\sum_{k=1}^C (\\frac{d_{ij}}{d_{ik}})^{\\frac{2}{m-1}}]^{-1}",
+        "sample_u_new": new_U[:, 0].tolist(),
+        "diff": float(diff)
+    }
+
+    add_to_checklist(x_session_id, f"FCM Iteration #{state['iteration']}")
+    sync_session_to_firebase(x_session_id)
+    return {"status": "success", "iteration": state["iteration"], "diff": float(diff), "sample_work": sample_work}
 
 @app.post("/stepwise/fcm-iteration/")
 async def fcm_iteration_step(x_session_id: Optional[str] = Header(None)):
