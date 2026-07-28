@@ -369,6 +369,112 @@ async def init_centroids_step(x_session_id: Optional[str] = Header(None), params
     sync_session_to_firebase(x_session_id)
     return {"status": "success", "centroids": centroids, "features": features, "message": "Inisialisasi berhasil."}
 
+# --- FUZZY C-MEANS (FCM) SPECIFIC ENDPOINTS ---
+
+@app.post("/stepwise/fcm-init/")
+async def fcm_init_step(x_session_id: Optional[str] = Header(None), params: Dict[str, Any] = Body({"k": 3, "m": 2.0})):
+    await ensure_session(x_session_id)
+    if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
+
+    df = sessions[x_session_id]["df"]
+    config = sessions[x_session_id].get("config", {})
+    k = params.get("k", 3)
+    m = params.get("m", 2.0)
+
+    features = config.get("features", list(df.select_dtypes(include=[np.number]).columns))
+    X = df[features].select_dtypes(include=[np.number]).fillna(0).values
+    n_samples = X.shape[0]
+
+    # Initialize Membership Matrix U (Randomly, rows sum to 1)
+    np.random.seed(42)
+    U = np.random.dirichlet(np.ones(k), size=n_samples).T # k x n_samples
+
+    sessions[x_session_id]["algo_state"] = {
+        "mode": "fcm",
+        "iteration": 0,
+        "U": U.tolist(),
+        "X": X.tolist(),
+        "features": features,
+        "k": k,
+        "m": m,
+        "history": [],
+        "is_converged": False
+    }
+
+    add_to_checklist(x_session_id, "FCM Matrix Init")
+    sync_session_to_firebase(x_session_id)
+    return {"status": "success", "message": f"Matriks keanggotaan fuzzy (k={k}, m={m}) berhasil diinisialisasi."}
+
+@app.post("/stepwise/fcm-iteration/")
+async def fcm_iteration_step(x_session_id: Optional[str] = Header(None)):
+    await ensure_session(x_session_id)
+    state = sessions[x_session_id].get("algo_state")
+    if not state or state.get("mode") != "fcm": raise HTTPException(status_code=400, detail="FCM state missing")
+
+    X = np.array(state["X"])
+    U = np.array(state["U"])
+    m = state["m"]
+    k = state["k"]
+
+    # 1. Update Centers
+    U_m = U ** m
+    centers = (U_m @ X) / U_m.sum(axis=1)[:, np.newaxis]
+
+    # 2. Update Membership Matrix U
+    # Calculate distances to new centers
+    dists = np.linalg.norm(X[:, np.newaxis] - centers, axis=2) # n_samples x k
+    dists = np.fmax(dists, 1e-10) # Avoid zero distance
+
+    # Formula: u_ij = 1 / sum( (d_ij/d_ik)^(2/(m-1)) )
+    power = 2.0 / (m - 1)
+    new_U = np.zeros_like(U.T) # n_samples x k
+
+    for i in range(X.shape[0]):
+        for j in range(k):
+            denominator = np.sum((dists[i, j] / dists[i, :]) ** power)
+            new_U[i, j] = 1.0 / denominator
+
+    new_U = new_U.T # k x n_samples
+
+    # Convergence check
+    diff = np.linalg.norm(new_U - U)
+    state["U"] = new_U.tolist()
+    state["centroids"] = centers.tolist()
+    state["iteration"] += 1
+    state["history"].append({"iter": state["iteration"], "diff": float(diff)})
+
+    is_converged = diff < 1e-4
+    state["is_converged"] = is_converged
+
+    if is_converged:
+        # Finalize FCM
+        assignments = np.argmax(new_U, axis=0)
+        metrics = calculate_cluster_metrics(sessions[x_session_id]["df"], state["features"], assignments, k)
+
+        # Add Fuzzy Specific Metrics: Partition Coefficient (PC)
+        pc = float(np.mean(np.sum(new_U**2, axis=0)))
+        metrics["partition_coefficient"] = pc
+        metrics["centroids"] = centers.tolist()
+        metrics["feature_names"] = state["features"]
+
+        sessions[x_session_id]["metrics"] = metrics
+        sessions[x_session_id]["df"]["cluster"] = assignments.tolist()
+
+        # Store membership for top 2
+        for j in range(k):
+            sessions[x_session_id]["df"][f"membership_c{j}"] = new_U[j, :].tolist()
+
+        add_to_checklist(x_session_id, "FCM Convergence Reached")
+
+    sync_session_to_firebase(x_session_id)
+    return {
+        "status": "success",
+        "iteration": state["iteration"],
+        "diff": float(diff),
+        "is_converged": is_converged,
+        "sample_membership": new_U[:, 0].tolist()
+    }
+
 @app.post("/stepwise/calculate-distances/")
 async def calculate_distances_step(x_session_id: Optional[str] = Header(None)):
     await ensure_session(x_session_id)
