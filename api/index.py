@@ -76,6 +76,8 @@ def add_to_checklist(x_session_id: str, step_name: str):
         if step_name not in checklist:
             checklist.append(step_name)
         sessions[x_session_id]["audit"]["execution_checklist"] = checklist
+        # Force Hard-Sync to Firebase to prevent data loss on page transition
+        sync_session_to_firebase(x_session_id)
 
 def calculate_cluster_metrics(df, features, assignments, k):
     try:
@@ -401,6 +403,11 @@ async def fcm_init_step(x_session_id: Optional[str] = Header(None), params: Dict
         "is_converged": False
     }
 
+    # Merge initial membership into dataframe for UI preview
+    for j in range(k):
+        df[f"membership_c{j}"] = np.round(U[j, :], 4).tolist()
+    sessions[x_session_id]["df"] = df
+
     add_to_checklist(x_session_id, "Inisialisasi FCM")
     sync_session_to_firebase(x_session_id)
 
@@ -446,9 +453,14 @@ async def fcm_calc_centers_step(x_session_id: Optional[str] = Header(None)):
     U_m = U ** m
     numerator = U_m @ X # k x n_features
     denominator = U_m.sum(axis=1)[:, np.newaxis] # k x 1
+    # Handle zero denominator to avoid NaN
+    denominator = np.where(denominator == 0, 1e-10, denominator)
     centers = numerator / denominator
 
     state["centroids"] = centers.tolist()
+
+    # Round for UI
+    rounded_centers = np.round(centers, 4).tolist()
 
     # Sample work for Step 15
     sample_work = {
@@ -460,12 +472,11 @@ async def fcm_calc_centers_step(x_session_id: Optional[str] = Header(None)):
             "m": "Parameter pembobotan fuzzy (Fuzzifier).",
             "x_i": "Vektor data subjek ke-i."
         },
-        "sample_v": centers[0].tolist()
+        "sample_v": rounded_centers[0]
     }
 
     add_to_checklist(x_session_id, "Kalkulasi Pusat V")
-    sync_session_to_firebase(x_session_id)
-    return {"status": "success", "centroids": centers.tolist(), "sample_work": sample_work}
+    return {"status": "success", "centroids": rounded_centers, "sample_work": sample_work}
 
 @app.post("/stepwise/fcm-update-membership/")
 async def fcm_update_u_step(x_session_id: Optional[str] = Header(None)):
@@ -517,7 +528,6 @@ async def fcm_update_u_step(x_session_id: Optional[str] = Header(None)):
     }
 
     add_to_checklist(x_session_id, "Optimasi Keanggotaan")
-    sync_session_to_firebase(x_session_id)
     return {"status": "success", "iteration": state["iteration"], "diff": float(diff), "sample_work": sample_work}
 
 @app.post("/stepwise/fcm-iteration/")
@@ -662,13 +672,65 @@ async def check_convergence(x_session_id: Optional[str] = Header(None)):
 async def auto_converge(x_session_id: Optional[str] = Header(None)):
     await ensure_session(x_session_id)
     state = sessions[x_session_id].get("algo_state")
+    if not state: raise HTTPException(status_code=400, detail="Algorithm state not initialized")
+
     df = sessions[x_session_id]["df"]
     features = state["features"]
+    k = state["k"]
     X = df[features].fillna(0).values
-
     start_time = time.time()
 
-    # MANUAL K-MEANS LOOP to capture real history for research validation
+    # 1. FCM AUTO-CONVERGE
+    if state.get("mode") == "fcm":
+        U = np.array(state["U"])
+        m = state["m"]
+        max_iter = 100
+        history = []
+        centers = None
+
+        for i in range(1, max_iter + 1):
+            # Update Centers
+            U_m = U ** m
+            centers = (U_m @ X) / U_m.sum(axis=1)[:, np.newaxis]
+
+            # Update U
+            dists = np.linalg.norm(X[:, np.newaxis] - centers, axis=2)
+            dists = np.fmax(dists, 1e-10)
+            power = 2.0 / (m - 1)
+            new_U = np.zeros((X.shape[0], k))
+            for row_idx in range(X.shape[0]):
+                for col_idx in range(k):
+                    new_U[row_idx, col_idx] = 1.0 / np.sum((dists[row_idx, col_idx] / dists[row_idx, :]) ** power)
+            new_U = new_U.T
+
+            diff = np.linalg.norm(new_U - U)
+            U = new_U
+            history.append({"iter": i, "diff": float(diff)})
+            if diff < 1e-4: break
+
+        end_time = time.time()
+        assignments = np.argmax(U, axis=0)
+        evaluation = calculate_cluster_metrics(df, features, assignments, k)
+        pc = float(np.mean(np.sum(U**2, axis=0)))
+        evaluation.update({
+            "partition_coefficient": pc,
+            "wcss": float(np.sum(np.min(np.linalg.norm(X[:, np.newaxis] - centers, axis=2), axis=1)**2)),
+            "iterations": len(history),
+            "runtime_sec": float(end_time - start_time),
+            "centroids": centers.tolist(),
+            "feature_names": features
+        })
+
+        df["cluster"] = assignments.tolist()
+        for j in range(k):
+            df[f"membership_c{j}"] = np.round(U[j, :], 4).tolist()
+            df[f"dist_c{j}"] = np.round(np.linalg.norm(X - centers[j], axis=1), 4).tolist()
+
+        sessions[x_session_id].update({"df": df, "metrics": evaluation})
+        add_to_checklist(x_session_id, "Riset Selesai")
+        return {"status": "success", "is_converged": True, "evaluation": evaluation}
+
+    # 2. K-MEANS AUTO-CONVERGE (Legacy)
     centroids = np.array(state["centroids"])
     history = []
     assignments = np.zeros(len(X))
@@ -706,7 +768,9 @@ async def auto_converge(x_session_id: Optional[str] = Header(None)):
     evaluation.update({
         "wcss": state["current_wcss"],
         "iterations": state["iteration"],
-        "runtime_sec": runtime
+        "runtime_sec": runtime,
+        "centroids": centroids.tolist(),
+        "feature_names": features
     })
 
     df["cluster"] = assignments.tolist()
