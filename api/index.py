@@ -220,7 +220,7 @@ async def stepwise_cleaning(x_session_id: Optional[str] = Header(None)):
     sessions[x_session_id]["df"] = df
 
     sessions[x_session_id]["checkpoints"]["Pembersihan Data (Sesudah)"] = get_representative_data(df)
-    add_to_checklist(x_session_id, "Cleaning")
+    add_to_checklist(x_session_id, "Pembersihan Data")
     sync_session_to_firebase(x_session_id)
     return {"status": "success", "final_rows": len(df), "log": f"Cleaning selesai."}
 
@@ -234,7 +234,7 @@ async def stepwise_missing(x_session_id: Optional[str] = Header(None)):
     for col in num_cols: df[col] = df[col].fillna(df[col].median())
     sessions[x_session_id]["df"] = df
     sessions[x_session_id]["checkpoints"]["Imputasi Nilai Kosong (Sesudah)"] = get_representative_data(df)
-    add_to_checklist(x_session_id, "Missing Value")
+    add_to_checklist(x_session_id, "Imputasi Data")
     sync_session_to_firebase(x_session_id)
     return {"status": "success"}
 
@@ -258,7 +258,7 @@ async def stepwise_outlier(x_session_id: Optional[str] = Header(None)):
     IQR = Q3 - Q1
     outliers_mask = ((num_df < (Q1 - 1.5 * IQR)) | (num_df > (Q3 + 1.5 * IQR))).any(axis=1)
     sessions[x_session_id]["checkpoints"]["Deteksi Outlier (Sesudah)"] = get_representative_data(df[~outliers_mask])
-    add_to_checklist(x_session_id, "Outlier")
+    add_to_checklist(x_session_id, "Audit Outlier")
     sync_session_to_firebase(x_session_id)
     return {"status": "success", "outlier_count": int(outliers_mask.sum())}
 
@@ -276,7 +276,7 @@ async def stepwise_conversion(x_session_id: Optional[str] = Header(None)):
         mapping_details[col] = {str(i): str(val) for i, val in enumerate(uniques)}
     sessions[x_session_id]["df"] = df
     sessions[x_session_id]["checkpoints"]["Konversi Kategorikal (Sesudah)"] = get_representative_data(df)
-    add_to_checklist(x_session_id, "Conversion")
+    add_to_checklist(x_session_id, "Konversi Fitur")
     sync_session_to_firebase(x_session_id)
     return {"status": "success", "mappings": mapping_details}
 
@@ -300,7 +300,7 @@ async def stepwise_norm(x_session_id: Optional[str] = Header(None)):
         df[num_cols] = MinMaxScaler().fit_transform(df[num_cols])
         sessions[x_session_id]["df"] = df
         sessions[x_session_id]["checkpoints"]["Normalisasi Min-Max (Sesudah)"] = get_representative_data(df)
-        add_to_checklist(x_session_id, "Normalization")
+        add_to_checklist(x_session_id, "Normalisasi Data")
         sync_session_to_firebase(x_session_id)
     return {"status": "success"}
 
@@ -315,7 +315,7 @@ async def stepwise_standard(x_session_id: Optional[str] = Header(None)):
         df[num_cols] = StandardScaler().fit_transform(df[num_cols])
         sessions[x_session_id]["df"] = df
         sessions[x_session_id]["checkpoints"]["Standardisasi Z-Score (Sesudah)"] = get_representative_data(df)
-        add_to_checklist(x_session_id, "Standardization")
+        add_to_checklist(x_session_id, "Standardisasi Data")
         sync_session_to_firebase(x_session_id)
     return {"status": "success"}
 
@@ -352,7 +352,7 @@ async def stepwise_elbow(x_session_id: Optional[str] = Header(None)):
     from sklearn.cluster import KMeans
     X = sessions[x_session_id]["df"].select_dtypes(include=[np.number]).fillna(0)
     wcss = [{"k": i, "wcss": float(KMeans(n_clusters=i, init='k-means++', n_init=10, random_state=42).fit(X).inertia_)} for i in range(1, 11)]
-    add_to_checklist(x_session_id, "Elbow Method")
+    add_to_checklist(x_session_id, "Analisis Elbow")
     sync_session_to_firebase(x_session_id)
     return {"status": "success", "data": wcss}
 
@@ -401,7 +401,7 @@ async def fcm_init_step(x_session_id: Optional[str] = Header(None), params: Dict
         "is_converged": False
     }
 
-    add_to_checklist(x_session_id, "FCM Matrix Init")
+    add_to_checklist(x_session_id, "Inisialisasi FCM")
     sync_session_to_firebase(x_session_id)
 
     # Merge initial membership into dataframe for UI preview
@@ -463,7 +463,7 @@ async def fcm_calc_centers_step(x_session_id: Optional[str] = Header(None)):
         "sample_v": centers[0].tolist()
     }
 
-    add_to_checklist(x_session_id, "FCM Center Update")
+    add_to_checklist(x_session_id, "Kalkulasi Pusat V")
     sync_session_to_firebase(x_session_id)
     return {"status": "success", "centroids": centers.tolist(), "sample_work": sample_work}
 
@@ -516,7 +516,7 @@ async def fcm_update_u_step(x_session_id: Optional[str] = Header(None)):
         "diff": float(diff)
     }
 
-    add_to_checklist(x_session_id, f"FCM Iteration #{state['iteration']}")
+    add_to_checklist(x_session_id, "Optimasi Keanggotaan")
     sync_session_to_firebase(x_session_id)
     return {"status": "success", "iteration": state["iteration"], "diff": float(diff), "sample_work": sample_work}
 
@@ -717,7 +717,7 @@ async def auto_converge(x_session_id: Optional[str] = Header(None)):
 
     sessions[x_session_id].update({"df": df, "metrics": evaluation})
 
-    add_to_checklist(x_session_id, "Clustering Finalized")
+    add_to_checklist(x_session_id, "Riset Selesai")
     sync_session_to_firebase(x_session_id)
     return {"status": "success", "is_converged": True, "iteration": state["iteration"], "history": history, "centroids": state["centroids"], "evaluation": evaluation}
 
@@ -739,7 +739,7 @@ async def run_kmeans_step(x_session_id: Optional[str] = Header(None), params: Di
     metrics = calculate_cluster_metrics(df, features, model.labels_, params.get("k", 3))
     metrics.update({"wcss": model.inertia_, "iterations": model.n_iter_, "centroids": model.cluster_centers_.tolist(), "feature_names": features})
     sessions[x_session_id].update({"df": df, "metrics": metrics})
-    add_to_checklist(x_session_id, "K-Means Completed")
+    add_to_checklist(x_session_id, "K-Means Selesai")
     sync_session_to_firebase(x_session_id)
     return {"status": "SUCCESS", "metrics": metrics}
 
