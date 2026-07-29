@@ -10,6 +10,8 @@ from sklearn.metrics import davies_bouldin_score, silhouette_score, calinski_har
 import io
 import uuid
 import json
+import pickle
+import base64
 import firebase_admin
 from firebase_admin import credentials, firestore
 from typing import Optional, List, Dict, Any
@@ -49,10 +51,24 @@ def sync_session_to_firebase(session_id: str):
     if not db or session_id not in sessions: return
     try:
         session = sessions[session_id].copy()
+
+        # Serialize Scaler if exists
+        if "scaler" in session and session["scaler"] is not None:
+            try:
+                session["scaler_b64"] = base64.b64encode(pickle.dumps(session["scaler"])).decode('utf-8')
+                del session["scaler"]
+            except Exception as e: print(f"Scaler serialization failed: {e}")
+
         if "df" in session and isinstance(session["df"], pd.DataFrame):
             df_cleaned = session["df"].replace([np.inf, -np.inf], np.nan).fillna(0)
             session["df_records"] = df_cleaned.to_dict(orient="records")
             del session["df"]
+
+        # Serialize Scaler for Simulation Integrity
+        if "scaler" in session and session["scaler"] is not None:
+            session["scaler_b64"] = base64.b64encode(pickle.dumps(session["scaler"])).decode('utf-8')
+            del session["scaler"]
+
         db.collection("python_sessions").document(session_id).set(session)
     except Exception as e: print(f"Failed to sync: {e}")
 
@@ -63,9 +79,25 @@ async def ensure_session(x_session_id: str):
             doc = db.collection("python_sessions").document(x_session_id).get()
             if doc.exists:
                 data = doc.to_dict()
+
+                # Deserialize Scaler
+                if "scaler_b64" in data:
+                    try:
+                        data["scaler"] = pickle.loads(base64.b64decode(data["scaler_b64"]))
+                        del data["scaler_b64"]
+                    except Exception as e: print(f"Scaler deserialization failed: {e}")
+
                 if "df_records" in data:
                     data["df"] = pd.DataFrame(data["df_records"])
                     del data["df_records"]
+
+                # Deserialize Scaler
+                if "scaler_b64" in data:
+                    try:
+                        data["scaler"] = pickle.loads(base64.b64decode(data["scaler_b64"]))
+                    except:
+                        data["scaler"] = None
+
                 sessions[x_session_id] = data
 
 def add_to_checklist(x_session_id: str, step_name: str):
@@ -76,6 +108,8 @@ def add_to_checklist(x_session_id: str, step_name: str):
         if step_name not in checklist:
             checklist.append(step_name)
         sessions[x_session_id]["audit"]["execution_checklist"] = checklist
+        # Force Hard-Sync to Firebase to prevent data loss on page transition
+        sync_session_to_firebase(x_session_id)
         # Force Hard-Sync to Firebase to prevent data loss on page transition
         sync_session_to_firebase(x_session_id)
 
@@ -99,6 +133,14 @@ def calculate_cluster_metrics(df, features, assignments, k):
 
         dist = {str(i): {"count": int(np.sum(assignments == i)), "percentage": float(np.sum(assignments == i) / len(df) * 100)} for i in range(k)}
         profiles = {str(i): df[assignments == i][features].mean(numeric_only=True).to_dict() for i in range(k)}
+
+        # Feature Importance Calculation (Sensitivity Analysis)
+        # We calculate variance of centroids across all clusters for each feature
+        centroid_matrix = np.array([profiles[str(i)].get(f, 0) for i in range(k) for f in features]).reshape(k, -1)
+        variances = np.var(centroid_matrix, axis=0)
+        # Normalize to percentage
+        importance_sum = np.sum(variances) if np.sum(variances) > 0 else 1.0
+        feature_importance = {f: float((v / importance_sum) * 100) for f, v in zip(features, variances)}
 
         # Rigiditas Ilmiah: Penjelasan Matematis & Interpretasi
         scientific_details = {
@@ -142,6 +184,7 @@ def calculate_cluster_metrics(df, features, assignments, k):
             "wcss": wcss,
             "distribution": dist,
             "cluster_profiles": profiles,
+            "feature_importance": feature_importance,
             "scientific_details": scientific_details,
             "improvement_advice": improvement_advice,
             "dbi": dbi
@@ -299,8 +342,10 @@ async def stepwise_norm(x_session_id: Optional[str] = Header(None)):
     df = sessions[x_session_id]["df"]
     num_cols = df.select_dtypes(include=['number']).columns
     if len(num_cols) > 0:
-        df[num_cols] = MinMaxScaler().fit_transform(df[num_cols])
+        scaler = MinMaxScaler()
+        df[num_cols] = scaler.fit_transform(df[num_cols])
         sessions[x_session_id]["df"] = df
+        sessions[x_session_id]["scaler"] = scaler # Store for simulation
         sessions[x_session_id]["checkpoints"]["Normalisasi Min-Max (Sesudah)"] = get_representative_data(df)
         add_to_checklist(x_session_id, "Normalisasi Data")
         sync_session_to_firebase(x_session_id)
@@ -314,8 +359,10 @@ async def stepwise_standard(x_session_id: Optional[str] = Header(None)):
     df = sessions[x_session_id]["df"]
     num_cols = df.select_dtypes(include=['number']).columns
     if len(num_cols) > 0:
-        df[num_cols] = StandardScaler().fit_transform(df[num_cols])
+        scaler = StandardScaler()
+        df[num_cols] = scaler.fit_transform(df[num_cols])
         sessions[x_session_id]["df"] = df
+        sessions[x_session_id]["scaler"] = scaler # Store for simulation
         sessions[x_session_id]["checkpoints"]["Standardisasi Z-Score (Sesudah)"] = get_representative_data(df)
         add_to_checklist(x_session_id, "Standardisasi Data")
         sync_session_to_firebase(x_session_id)
@@ -476,6 +523,7 @@ async def fcm_calc_centers_step(x_session_id: Optional[str] = Header(None)):
     }
 
     add_to_checklist(x_session_id, "Kalkulasi Pusat V")
+    sync_session_to_firebase(x_session_id)
     return {"status": "success", "centroids": rounded_centers, "sample_work": sample_work}
 
 @app.post("/stepwise/fcm-update-membership/")
@@ -528,6 +576,7 @@ async def fcm_update_u_step(x_session_id: Optional[str] = Header(None)):
     }
 
     add_to_checklist(x_session_id, "Optimasi Keanggotaan")
+    sync_session_to_firebase(x_session_id)
     return {"status": "success", "iteration": state["iteration"], "diff": float(diff), "sample_work": sample_work}
 
 @app.post("/stepwise/fcm-iteration/")
@@ -828,11 +877,95 @@ async def get_final_analysis(x_session_id: Optional[str] = Header(None)):
         "runtime_sec": metrics.get("runtime_sec", 0.0),
         "cluster_distribution": metrics.get("distribution", {}),
         "cluster_profiles": metrics.get("cluster_profiles", {}),
+        "feature_importance": metrics.get("feature_importance", {}),
         "centroids": metrics.get("centroids", []),
         "feature_names": metrics.get("feature_names", list(session["df"].select_dtypes(include=[np.number]).columns)),
         "hasil_cluster": session["df"].to_dict(orient="records")
     }
     return result
+
+@app.post("/stepwise/benchmark/")
+async def stepwise_benchmark(x_session_id: Optional[str] = Header(None)):
+    await ensure_session(x_session_id)
+    if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
+
+    session = sessions[x_session_id]
+    df = session["df"]
+    config = session.get("config", {})
+    k = config.get("k", 3)
+    features = config.get("features", list(df.select_dtypes(include=[np.number]).columns))
+    X = df[features].select_dtypes(include=[np.number]).fillna(0).values
+
+    results = {}
+
+    # 1. K-Means++ Run
+    from sklearn.cluster import KMeans
+    start_km = time.time()
+    kmeans = KMeans(n_clusters=k, init='k-means++', n_init=10, random_state=42).fit(X)
+    end_km = time.time()
+
+    km_labels = kmeans.labels_
+    km_sil = float(silhouette_score(X, km_labels))
+    km_dbi = float(davies_bouldin_score(X, km_labels))
+    km_chi = float(calinski_harabasz_score(X, km_labels))
+
+    results["kmeans"] = {
+        "name": "K-Means++",
+        "silhouette": km_sil,
+        "dbi": km_dbi,
+        "chi": km_chi,
+        "wcss": float(kmeans.inertia_),
+        "time": float(end_km - start_km)
+    }
+
+    # 2. Fuzzy C-Means Run
+    start_fcm = time.time()
+    m = config.get("m", 2.0)
+    # Re-use our fcm logic or a fast version
+    U = np.random.dirichlet(np.ones(k), size=X.shape[0]).T
+    for _ in range(50): # Cap at 50 for benchmark speed
+        U_m = U ** m
+        centers = (U_m @ X) / U_m.sum(axis=1)[:, np.newaxis]
+        dists = np.linalg.norm(X[:, np.newaxis] - centers, axis=2)
+        dists = np.fmax(dists, 1e-10)
+        power = 2.0 / (m - 1)
+        new_U = np.zeros((X.shape[0], k))
+        for r in range(X.shape[0]):
+            for c in range(k):
+                new_U[r, c] = 1.0 / np.sum((dists[r, c] / dists[r, :]) ** power)
+        new_U = new_U.T
+        if np.linalg.norm(new_U - U) < 1e-4: break
+        U = new_U
+    end_fcm = time.time()
+
+    fcm_labels = np.argmax(U, axis=0)
+    fcm_sil = float(silhouette_score(X, fcm_labels))
+    fcm_dbi = float(davies_bouldin_score(X, fcm_labels))
+    fcm_chi = float(calinski_harabasz_score(X, fcm_labels))
+    fcm_pc = float(np.mean(np.sum(U**2, axis=0)))
+
+    results["fcm"] = {
+        "name": "Fuzzy C-Means",
+        "silhouette": fcm_sil,
+        "dbi": fcm_dbi,
+        "chi": fcm_chi,
+        "wcss": float(np.sum(np.min(np.linalg.norm(X[:, np.newaxis] - centers, axis=2), axis=1)**2)),
+        "time": float(end_fcm - start_fcm),
+        "partition_coefficient": fcm_pc
+    }
+
+    # 3. Comparative Conclusion Generator
+    better_sil = "FCM" if fcm_sil > km_sil else "K-Means"
+    better_dbi = "FCM" if fcm_dbi < km_dbi else "K-Means"
+
+    comparison = {
+        "winner_quality": better_sil if better_sil == better_dbi else "Mixed",
+        "sil_diff_pct": abs(fcm_sil - km_sil) / max(km_sil, 1e-10) * 100,
+        "dbi_diff_pct": abs(fcm_dbi - km_dbi) / max(km_dbi, 1e-10) * 100,
+        "conclusion": f"Berdasarkan metrik validitas, {better_sil} menunjukkan kualitas separasi yang lebih baik, sedangkan {better_dbi} memiliki rasio sebaran klaster yang lebih optimal."
+    }
+
+    return {"status": "success", "results": results, "comparison": comparison}
 
 @app.post("/stepwise/save_config/")
 @app.post("/stepwise/mapping-config/")
@@ -842,6 +975,65 @@ async def stepwise_mapping(x_session_id: Optional[str] = Header(None), config: D
     sessions[x_session_id]["config"].update(config)
     sync_session_to_firebase(x_session_id)
     return {"status": "success"}
+
+@app.post("/stepwise/simulate/")
+async def simulate_scenario(x_session_id: Optional[str] = Header(None), data: Dict[str, Any] = Body(...)):
+    """Simulates a 'What-If' scenario with prescriptive advice in Indonesian."""
+    await ensure_session(x_session_id)
+    if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
+
+    session = sessions[x_session_id]
+    scaler = session.get("scaler")
+    metrics = session.get("metrics")
+
+    if not metrics or "centroids" not in metrics:
+        raise HTTPException(status_code=400, detail="Riset belum selesai. Jalankan clustering terlebih dahulu.")
+
+    features = metrics.get("feature_names", [])
+    centroids = np.array(metrics["centroids"])
+
+    # 1. Prepare raw input vector
+    input_vals = [float(data.get(f, 0)) for f in features]
+    X_input = np.array([input_vals])
+
+    # 2. Apply Scaler if exists
+    X_scaled = scaler.transform(X_input) if scaler else X_input
+
+    # 3. Predict Cluster
+    dists = np.linalg.norm(centroids - X_scaled, axis=1)
+    new_cluster = int(np.argmin(dists))
+    confidence = 1.0 - (np.min(dists) / np.sum(dists)) if np.sum(dists) > 0 else 1.0
+
+    # 4. Prescriptive Logic: Find "Best" Cluster to compare
+    # We assume the cluster with highest average values is the target
+    centroid_means = np.mean(centroids, axis=1)
+    best_cluster_idx = int(np.argmax(centroid_means))
+
+    advice = []
+    if new_cluster != best_cluster_idx:
+        target_centroid = centroids[best_cluster_idx]
+        for i, f in enumerate(features):
+            diff = target_centroid[i] - X_scaled[0][i]
+            if diff > 0.1: # Significant gap
+                # Inverse transform the gap if scaler exists to show real units
+                real_diff = diff
+                if scaler and hasattr(scaler, 'scale_'):
+                    real_diff = diff / scaler.scale_[i]
+
+                advice.append(f"Tingkatkan variabel '{f}' sekitar {real_diff:.2f} poin.")
+
+    prescriptive_narrative = " ".join(advice) if advice else "Performa subjek sudah berada pada profil optimal atau mendekati target tertinggi."
+
+    return {
+        "status": "success",
+        "original_data": data,
+        "scaled_vector": X_scaled.tolist()[0],
+        "predicted_cluster": new_cluster,
+        "confidence": float(confidence),
+        "distances": dists.tolist(),
+        "prescriptive_advice": prescriptive_narrative,
+        "target_cluster": best_cluster_idx
+    }
 
 @app.get("/stepwise/export-excel/")
 async def export_excel(x_session_id: Optional[str] = Header(None)):
