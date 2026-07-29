@@ -404,11 +404,25 @@ async def fcm_init_step(x_session_id: Optional[str] = Header(None), params: Dict
     add_to_checklist(x_session_id, "FCM Matrix Init")
     sync_session_to_firebase(x_session_id)
 
+    # Merge initial membership into dataframe for UI preview
+    # Round to 4 decimals for visual professionality
+    for j in range(k):
+        df[f"membership_c{j}"] = np.round(U[j, :], 4).tolist()
+    sessions[x_session_id]["df"] = df
+
+    # Metadata Label column from config
+    label_col = config.get("label", "nama")
+
     # Sample work for Step 14
     sample_work = {
         "explanation": "Matriks U diinisialisasi secara acak menggunakan Distribusi Dirichlet untuk menjamin total probabilitas keanggotaan per baris adalah 1.0.",
-        "sample_u": U[:, 0].tolist(),
-        "formula": "U^{(0)} = [\\mu_{ij}] \\in [0, 1]"
+        "sample_u": [float(x) for x in np.round(U[:, 0], 4)],
+        "formula": "U^{(0)} = [\\mu_{ij}] \\in [0, 1]",
+        "label_column": label_col,
+        "symbols": {
+            "\\mu_{ij}": "Derajat keanggotaan subjek i pada klaster j.",
+            "U^{(0)}": "Matriks keanggotaan awal (iterasi ke-0)."
+        }
     }
 
     return {
@@ -426,6 +440,7 @@ async def fcm_calc_centers_step(x_session_id: Optional[str] = Header(None)):
     X = np.array(state["X"])
     U = np.array(state["U"])
     m = state["m"]
+    k = state["k"]
 
     # Formula: v_j = sum( u_ij^m * x_i ) / sum( u_ij^m )
     U_m = U ** m
@@ -437,8 +452,14 @@ async def fcm_calc_centers_step(x_session_id: Optional[str] = Header(None)):
 
     # Sample work for Step 15
     sample_work = {
-        "explanation": f"Pusat klaster (Centroid) dihitung sebagai rata-rata terbobot dari seluruh data menggunakan pangkat m={m} dari matriks keanggotaan.",
+        "explanation": f"Pusat klaster (Centroid) dihitung sebagai rata-rata terbobot dari seluruh data menggunakan pangkat m={m} dari matriks keanggotaan. Fitur dengan bobot keanggotaan tinggi akan menarik pusat klaster lebih kuat.",
         "formula": "v_j = \\frac{\\sum_{i=1}^n \\mu_{ij}^m x_i}{\\sum_{i=1}^n \\mu_{ij}^m}",
+        "symbols": {
+            "v_j": "Vektor pusat klaster (Centroid) ke-j.",
+            "\\mu_{ij}": "Derajat keanggotaan subjek i pada klaster j.",
+            "m": "Parameter pembobotan fuzzy (Fuzzifier).",
+            "x_i": "Vektor data subjek ke-i."
+        },
         "sample_v": centers[0].tolist()
     }
 
@@ -457,6 +478,7 @@ async def fcm_update_u_step(x_session_id: Optional[str] = Header(None)):
     centers = np.array(state["centroids"])
     m = state["m"]
     k = state["k"]
+    df = sessions[x_session_id]["df"]
 
     dists = np.linalg.norm(X[:, np.newaxis] - centers, axis=2)
     dists = np.fmax(dists, 1e-10)
@@ -476,11 +498,21 @@ async def fcm_update_u_step(x_session_id: Optional[str] = Header(None)):
     state["iteration"] += 1
     state["history"].append({"iter": state["iteration"], "diff": float(diff)})
 
+    # Merge updated membership into dataframe for UI preview
+    for j in range(k):
+        df[f"membership_c{j}"] = np.round(new_U[j, :], 4).tolist()
+    sessions[x_session_id]["df"] = df
+
     # Sample work for Step 16
     sample_work = {
-        "explanation": "Derajat keanggotaan diperbarui berdasarkan rasio jarak relatif subjek terhadap seluruh pusat klaster.",
+        "explanation": "Derajat keanggotaan diperbarui berdasarkan rasio jarak relatif subjek terhadap seluruh pusat klaster. Semakin dekat subjek ke pusat j, semakin besar nilai keanggotaannya.",
         "formula": "\\mu_{ij} = [\\sum_{k=1}^C (\\frac{d_{ij}}{d_{ik}})^{\\frac{2}{m-1}}]^{-1}",
-        "sample_u_new": new_U[:, 0].tolist(),
+        "symbols": {
+            "\\mu_{ij}": "Nilai keanggotaan baru subjek i pada klaster j.",
+            "d_{ij}": "Jarak Euclidean subjek i ke pusat klaster j.",
+            "C": "Jumlah klaster (K)."
+        },
+        "sample_u_new": [float(x) for x in np.round(new_U[:, 0], 4)],
         "diff": float(diff)
     }
 
@@ -543,9 +575,9 @@ async def fcm_iteration_step(x_session_id: Optional[str] = Header(None)):
         sessions[x_session_id]["metrics"] = metrics
         sessions[x_session_id]["df"]["cluster"] = assignments.tolist()
 
-        # Store membership for top 2
+        # Store membership for all clusters
         for j in range(k):
-            sessions[x_session_id]["df"][f"membership_c{j}"] = new_U[j, :].tolist()
+            sessions[x_session_id]["df"][f"membership_c{j}"] = np.round(new_U[j, :], 4).tolist()
 
         add_to_checklist(x_session_id, "FCM Convergence Reached")
 
