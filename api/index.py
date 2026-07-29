@@ -854,7 +854,13 @@ async def calculate_distances_step(x_session_id: Optional[str] = Header(None)):
         # Weighted Euclidean: sqrt( sum( w_i * (x_i - c_i)^2 ) )
         distances = []
         for row in X:
-            d = np.sqrt(np.sum(w * (row - centroids)**2, axis=1))
+            # Weighted Euclidean Logic Correction V3.4
+            row_weighted = row * np.sqrt(w)
+            if state.get("method") != "hybrid_ga":
+                centroids_calc = centroids * np.sqrt(w)
+            else:
+                centroids_calc = centroids
+            d = np.linalg.norm(centroids_calc - row_weighted, axis=1)
             distances.append(d.tolist())
     else:
         distances = [np.linalg.norm(centroids - row, axis=1).tolist() for row in X]
