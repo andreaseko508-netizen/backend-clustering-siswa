@@ -500,11 +500,26 @@ async def stepwise_conversion(x_session_id: Optional[str] = Header(None)):
 
 @app.get("/stepwise/normalization-stats/")
 async def get_norm_stats(x_session_id: Optional[str] = Header(None)):
+    """Population Audit: Calculates detailed descriptive statistics for all numeric features."""
     await ensure_session(x_session_id)
     if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
+
     df = sessions[x_session_id]["df"]
     num_df = df.select_dtypes(include=['number'])
-    stats = {col: {"min": float(num_df[col].min()), "max": float(num_df[col].max()), "mean": float(num_df[col].mean())} for col in num_df.columns}
+
+    stats = {}
+    for col in num_df.columns:
+        series = num_df[col].dropna()
+        if len(series) > 0:
+            stats[col] = {
+                "min": float(series.min()),
+                "max": float(series.max()),
+                "mean": float(series.mean()),
+                "median": float(series.median()),
+                "std": float(series.std()) if len(series) > 1 else 0.0,
+                "variance": float(series.var()) if len(series) > 1 else 0.0
+            }
+
     return {"status": "success", "stats": stats}
 
 @app.post("/stepwise/normalization/")
