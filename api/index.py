@@ -117,69 +117,57 @@ def add_to_checklist(x_session_id: str, step_name: str):
         # Force Hard-Sync to Firebase to prevent data loss on page transition
         sync_session_to_firebase(x_session_id)
 
-def calculate_cluster_metrics(df, features, assignments, k):
+def calculate_cluster_metrics(df, features, assignments, k, weights_dict=None):
     try:
-        X = df[features].select_dtypes(include=[np.number]).fillna(0)
+        X_raw = df[features].select_dtypes(include=[np.number]).fillna(0).values
+
+        # S2 OPTIMIZATION: Calculate metrics in Weighted Space for consistency with algorithm goal
+        if weights_dict:
+            w = np.array([weights_dict.get(f, 1.0) for f in features])
+            X = X_raw * np.sqrt(w)
+        else:
+            X = X_raw
+
         unique_labels = np.unique(assignments)
 
         dbi = float(davies_bouldin_score(X, assignments)) if len(unique_labels) > 1 else 0.0
         sil = float(silhouette_score(X, assignments)) if len(unique_labels) > 1 else 0.0
         chi = float(calinski_harabasz_score(X, assignments)) if len(unique_labels) > 1 else 0.0
 
-        # WCSS Calculation
+        # WCSS Calculation in appropriate space
         wcss = 0.0
         if len(unique_labels) > 1:
             for i in range(k):
                 cluster_points = X[assignments == i]
                 if len(cluster_points) > 0:
-                    center = cluster_points.mean().values
-                    wcss += np.sum((cluster_points.values - center)**2)
+                    center = cluster_points.mean(axis=0)
+                    wcss += np.sum((cluster_points - center)**2)
 
         dist = {str(i): {"count": int(np.sum(assignments == i)), "percentage": float(np.sum(assignments == i) / len(df) * 100)} for i in range(k)}
         profiles = {str(i): df[assignments == i][features].mean(numeric_only=True).to_dict() for i in range(k)}
 
-        # Feature Importance Calculation (Sensitivity Analysis)
-        # We calculate variance of centroids across all clusters for each feature
+        # Feature Importance & Sensitivity Analysis
         centroid_matrix = np.array([profiles[str(i)].get(f, 0) for i in range(k) for f in features]).reshape(k, -1)
         variances = np.var(centroid_matrix, axis=0)
-        # Normalize to percentage
         importance_sum = np.sum(variances) if np.sum(variances) > 0 else 1.0
         feature_importance = {f: float((v / importance_sum) * 100) for f, v in zip(features, variances)}
 
-        # Rigiditas Ilmiah: Penjelasan Matematis & Interpretasi
-        scientific_details = {
-            "silhouette": {
-                "name": "Silhouette Coefficient",
-                "formula": "s = (b - a) / max(a, b)",
-                "description": "Mengukur seberapa mirip sebuah objek dengan clusternya sendiri dibandingkan dengan cluster lain.",
-                "interpretation": "Rentang [-1, 1]. Nilai mendekati 1 menunjukkan pemisahan cluster yang sangat baik.",
-                "value": sil
-            },
-            "dbi": {
-                "name": "Davies-Bouldin Index",
-                "formula": "DB = (1/k) Σ max((Ri + Rj) / dij)",
-                "description": "Rasio jumlah dispersi dalam cluster terhadap jarak antar cluster.",
-                "interpretation": "Semakin kecil nilai DBI (mendekati 0), maka kualitas clustering semakin baik.",
-                "value": dbi
-            },
-            "wcss": {
-                "name": "Within-Cluster Sum of Squares",
-                "formula": "WCSS = Σ Σ ||xi - ci||²",
-                "description": "Total variansi dalam cluster (jarak kuadrat objek ke pusat clusternya).",
-                "interpretation": "Digunakan dalam Elbow Method. Nilai yang lebih kecil menunjukkan cluster yang lebih padat.",
-                "value": wcss
-            }
-        }
+        # Feature Correlation Audit (Redundancy Check)
+        corr_matrix = pd.DataFrame(X_raw, columns=features).corr().abs()
+        redundant_features = []
+        for i in range(len(features)):
+            for j in range(i + 1, len(features)):
+                if corr_matrix.iloc[i, j] > 0.90:
+                    redundant_features.append({"f1": features[i], "f2": features[j], "val": float(corr_matrix.iloc[i, j])})
 
-        # Rekomendasi Perbaikan Otomatis (Advisor)
+        # Rigiditas Ilmiah: Research Optimization Advisor Logic
         improvement_advice = []
-        if sil < 0.25:
-            improvement_advice.append("Gunakan 'Standardisasi Z-Score' jika fitur memiliki rentang nilai yang sangat berbeda.")
-            improvement_advice.append("Coba kurangi atau tambah nilai K menggunakan referensi grafik Elbow.")
-        if dbi > 1.2:
-            improvement_advice.append("Sistem mendeteksi overlap antar cluster. Pastikan outlier sudah dibersihkan pada tahap preprocessing.")
-        if sil > 0.5 and dbi < 0.8:
-            improvement_advice.append("Kualitas clustering optimal. Hasil sudah sangat layak untuk interpretasi riset.")
+        if sil < 0.35:
+            improvement_advice.append("Koefisien Silhouette rendah. Coba eliminasi variabel dengan importance < 5% atau bersihkan outlier lebih agresif.")
+        if dbi > 1.0:
+            improvement_advice.append("Indeks Davies-Bouldin tinggi (> 1.0) menunjukkan overlap antar klaster. Pertimbangkan normalisasi ulang atau penyesuaian K.")
+        if redundant_features:
+            improvement_advice.append(f"Ditemukan {len(redundant_features)} pasangan variabel redundan (Korelasi > 0.9). Ini dapat melemahkan validitas statistik.")
 
         return {
             "davies_bouldin_index": dbi,
@@ -189,14 +177,14 @@ def calculate_cluster_metrics(df, features, assignments, k):
             "distribution": dist,
             "cluster_profiles": profiles,
             "feature_importance": feature_importance,
-            "scientific_details": scientific_details,
             "improvement_advice": improvement_advice,
+            "redundant_features": redundant_features,
             "dbi": dbi,
             "timestamp": time.time()
         }
     except Exception as e:
         print(f"Metrics Error: {e}")
-        return {"davies_bouldin_index": 0.0, "silhouette_score": 0.0, "calinski_harabasz_index": 0.0, "wcss": 0.0, "distribution": {}, "cluster_profiles": {}, "scientific_details": {}, "dbi": 0.0}
+        return {"davies_bouldin_index": 0.0, "silhouette_score": 0.0, "calinski_harabasz_index": 0.0, "wcss": 0.0, "distribution": {}, "cluster_profiles": {}, "dbi": 0.0}
 
 # --- ENDPOINTS ---
 
@@ -305,13 +293,30 @@ async def stepwise_outlier(x_session_id: Optional[str] = Header(None)):
     df = sessions[x_session_id]["df"]
     features = sessions[x_session_id]["config"].get("features", list(df.select_dtypes(include=['number']).columns))
     num_df = df[features].select_dtypes(include=['number'])
+
+    # S2 OPTIMIZATION: Dual Strategy Outlier Audit
+    # 1. IQR Method (Standard)
     Q1, Q3 = num_df.quantile(0.25), num_df.quantile(0.75)
     IQR = Q3 - Q1
-    outliers_mask = ((num_df < (Q1 - 1.5 * IQR)) | (num_df > (Q3 + 1.5 * IQR))).any(axis=1)
+    iqr_mask = ((num_df < (Q1 - 1.5 * IQR)) | (num_df > (Q3 + 1.5 * IQR))).any(axis=1)
+
+    # 2. Z-Score Method (Robust for normal distribution)
+    z_scores = np.abs((num_df - num_df.mean()) / num_df.std())
+    z_mask = (z_scores > 3).any(axis=1)
+
+    # Total Outliers (Union)
+    outliers_mask = iqr_mask | z_mask
+
     sessions[x_session_id]["checkpoints"]["Deteksi Outlier (Sesudah)"] = get_representative_data(df[~outliers_mask])
     add_to_checklist(x_session_id, "Audit Outlier")
     sync_session_to_firebase(x_session_id)
-    return {"status": "success", "outlier_count": int(outliers_mask.sum())}
+    return {
+        "status": "success",
+        "outlier_count": int(outliers_mask.sum()),
+        "iqr_count": int(iqr_mask.sum()),
+        "zscore_count": int(z_mask.sum()),
+        "method_used": "Hybrid IQR + Z-Score (|Z|>3)"
+    }
 
 @app.post("/stepwise/conversion/")
 async def stepwise_conversion(x_session_id: Optional[str] = Header(None)):
@@ -628,8 +633,9 @@ async def fcm_iteration_step(x_session_id: Optional[str] = Header(None)):
 
     if is_converged:
         # Finalize FCM
+        ahp_weights = sessions[x_session_id]["config"].get("ahp_weights")
         assignments = np.argmax(new_U, axis=0)
-        metrics = calculate_cluster_metrics(sessions[x_session_id]["df"], state["features"], assignments, k)
+        metrics = calculate_cluster_metrics(sessions[x_session_id]["df"], state["features"], assignments, k, weights_dict=ahp_weights)
 
         # Add Fuzzy Specific Metrics: Partition Coefficient (PC)
         pc = float(np.mean(np.sum(new_U**2, axis=0)))
@@ -704,57 +710,64 @@ def get_weighted_x(X, weights_dict, features):
 
 @app.post("/stepwise/init-centroids-ga/")
 async def init_centroids_ga(x_session_id: Optional[str] = Header(None), params: Dict[str, Any] = Body({"k": 3})):
-    """Hybrid GA-KMeans: Uses Genetic Algorithm to find optimal starting centroids."""
+    """Enhanced GA-KMeans: Scientific Population Evolution with k-means++ seeding."""
     await ensure_session(x_session_id)
     if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
 
     df, k = sessions[x_session_id]["df"], params.get("k", 3)
     features = sessions[x_session_id]["config"].get("features", list(df.select_dtypes(include=[np.number]).columns))
-    X = df[features].select_dtypes(include=[np.number]).fillna(0).values
+    X_raw = df[features].select_dtypes(include=[np.number]).fillna(0).values
 
-    # Weighted Support
+    # Support Weighted Distance for GA
     ahp_weights = sessions[x_session_id]["config"].get("ahp_weights")
-    X_weighted = get_weighted_x(X, ahp_weights, features)
+    X = get_weighted_x(X_raw, ahp_weights, features)
 
     n_samples, n_features = X.shape
-    pop_size = 20
-    generations = 10
+    pop_size = 50 # S2 Boosted
+    generations = 50 # S2 Boosted
 
-    # Population: list of centroid sets
-    population = [X_weighted[np.random.choice(n_samples, k, replace=False)] for _ in range(pop_size)]
+    # 1. Seeding: Include k-means++ as a high-quality baseline individual
+    from sklearn.cluster import kmeans_plusplus
+    km_plus_centroids, _ = kmeans_plusplus(X, n_clusters=k, random_state=42)
+
+    population = [km_plus_centroids]
+    # Rest are random samples
+    while len(population) < pop_size:
+        population.append(X[np.random.choice(n_samples, k, replace=False)])
 
     def fitness(centroids):
-        # Calculate WCSS
-        dists = np.linalg.norm(X_weighted[:, np.newaxis] - centroids, axis=2)
+        # Min-min distance (WCSS equivalent)
+        dists = np.linalg.norm(X[:, np.newaxis] - centroids, axis=2)
         wcss = np.sum(np.min(dists, axis=1)**2)
         return 1.0 / (wcss + 1e-10)
 
-    for _ in range(generations):
-        # Sort by fitness
+    for gen in range(generations):
+        # Sort population by fitness
         population = sorted(population, key=lambda c: fitness(c), reverse=True)
-        # Selection (Top 50%)
-        new_pop = population[:pop_size//2]
-        # Crossover & Mutation
+        # Elitism: Keep Top 20%
+        new_pop = population[:pop_size // 5]
+
         while len(new_pop) < pop_size:
-            p1, p2 = np.random.choice(len(new_pop), 2, replace=False)
-            child = (new_pop[p1] + new_pop[p2]) / 2.0 # Averaging centroids
-            # Mutation: slightly nudge one centroid
-            if np.random.rand() < 0.2:
-                child[np.random.randint(k)] += np.random.normal(0, 0.05, n_features)
+            # Tournament Selection
+            idx1, idx2 = np.random.choice(len(population)//2, 2, replace=False)
+            p1, p2 = population[idx1], population[idx2]
+
+            # Arithmetic Crossover
+            alpha = np.random.rand()
+            child = alpha * p1 + (1 - alpha) * p2
+
+            # Mutation: Gaussian nudge
+            if np.random.rand() < 0.3:
+                child[np.random.randint(k)] += np.random.normal(0, 0.02, n_features)
+
             new_pop.append(child)
         population = new_pop
 
-    best_centroids_weighted = population[0]
+    best_centroids = population[0]
 
-    # Revert weighting for storage if needed, or store weighted for consistency
-    # Usually we want the actual coordinates in data space.
-    # centroids = best_centroids_weighted / np.sqrt(weights) if weights else best_centroids_weighted
-    # But for simplicity, we'll store them as is and use weighted X in run steps.
-
-    # Store in algo_state
     sessions[x_session_id]["algo_state"] = {
         "iteration": 0,
-        "centroids": best_centroids_weighted.tolist(),
+        "centroids": best_centroids.tolist(),
         "features": features,
         "k": k,
         "history": [],
@@ -765,11 +778,7 @@ async def init_centroids_ga(x_session_id: Optional[str] = Header(None), params: 
     add_to_checklist(x_session_id, "Inisialisasi GA")
     sync_session_to_firebase(x_session_id)
 
-    return {
-        "status": "success",
-        "centroids": best_centroids_weighted.tolist(),
-        "message": "Inisialisasi GA-KMeans selesai dengan fitness optimal."
-    }
+    return {"status": "success", "centroids": best_centroids.tolist(), "message": "Inisialisasi GA (Generation=50, Pop=50) dengan k-means++ seeding selesai."}
 
 @app.post("/stepwise/compare-all/")
 async def compare_all(x_session_id: Optional[str] = Header(None)):
@@ -917,7 +926,8 @@ async def check_convergence(x_session_id: Optional[str] = Header(None)):
 
     evaluation = {}
     if is_converged:
-        evaluation = calculate_cluster_metrics(sessions[x_session_id]["df"], state["features"], np.array(state["assignments"]), state["k"])
+        ahp_weights = sessions[x_session_id]["config"].get("ahp_weights")
+        evaluation = calculate_cluster_metrics(sessions[x_session_id]["df"], state["features"], np.array(state["assignments"]), state["k"], weights_dict=ahp_weights)
         sessions[x_session_id]["df"]["cluster"] = state["assignments"]
         sessions[x_session_id]["metrics"] = evaluation
 
@@ -972,7 +982,8 @@ async def auto_converge(x_session_id: Optional[str] = Header(None)):
 
         end_time = time.time()
         assignments = np.argmax(U, axis=0)
-        evaluation = calculate_cluster_metrics(df, features, assignments, k)
+        ahp_weights = sessions[x_session_id]["config"].get("ahp_weights")
+        evaluation = calculate_cluster_metrics(df, features, assignments, k, weights_dict=ahp_weights)
         pc = float(np.mean(np.sum(U**2, axis=0)))
         evaluation.update({
             "partition_coefficient": pc,
@@ -1031,7 +1042,8 @@ async def auto_converge(x_session_id: Optional[str] = Header(None)):
         "current_wcss": history[-1]["wcss"] if history else 0.0
     })
 
-    evaluation = calculate_cluster_metrics(df, features, assignments, state["k"])
+    ahp_weights = sessions[x_session_id]["config"].get("ahp_weights")
+    evaluation = calculate_cluster_metrics(df, features, assignments, state["k"], weights_dict=ahp_weights)
     evaluation.update({
         "wcss": state["current_wcss"],
         "iterations": state["iteration"],
@@ -1080,7 +1092,7 @@ async def run_kmeans_step(x_session_id: Optional[str] = Header(None), params: Di
         else:
             df[f"dist_c{j}"] = np.linalg.norm(X - centroids[j], axis=1).tolist()
 
-    metrics = calculate_cluster_metrics(df, features, model.labels_, params.get("k", 3))
+    metrics = calculate_cluster_metrics(df, features, model.labels_, params.get("k", 3), weights_dict=ahp_weights)
     metrics.update({"wcss": model.inertia_, "iterations": model.n_iter_, "centroids": model.cluster_centers_.tolist(), "feature_names": features})
 
     sessions[x_session_id].update({"df": df, "metrics": metrics})
@@ -1126,9 +1138,11 @@ async def stepwise_benchmark(x_session_id: Optional[str] = Header(None)):
     session = sessions[x_session_id]
     df = session["df"]
     config = session.get("config", {})
+    ahp_weights = config.get("ahp_weights")
     k = config.get("k", 3)
     features = config.get("features", list(df.select_dtypes(include=[np.number]).columns))
-    X = df[features].select_dtypes(include=[np.number]).fillna(0).values
+    X_raw = df[features].select_dtypes(include=[np.number]).fillna(0).values
+    X = get_weighted_x(X_raw, ahp_weights, features)
 
     results = {}
 
