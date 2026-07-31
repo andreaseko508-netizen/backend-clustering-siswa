@@ -11,7 +11,6 @@ from sklearn.neighbors import NearestNeighbors
 from sklearn.decomposition import PCA
 from scipy.stats import chi2, shapiro
 import io
-import shap
 import uuid
 import json
 import pickle
@@ -1653,7 +1652,7 @@ async def spatial_map_projection(x_session_id: Optional[str] = Header(None)):
 
 @app.get("/stepwise/explain-siswa/")
 async def explain_student_clustering(x_session_id: Optional[str] = Header(None), nis: str = ""):
-    """Explainable AI (SHAP): Explains why a student was assigned to their cluster."""
+    """Mathematical Transparency (Lightweight): Explains why a student was assigned to their cluster."""
     await ensure_session(x_session_id)
     if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
 
@@ -1668,47 +1667,53 @@ async def explain_student_clustering(x_session_id: Optional[str] = Header(None),
 
     config = session.get("config", {})
     features = config.get("features", list(df.select_dtypes(include=[np.number]).columns))
-    ahp_weights = config.get("ahp_weights")
+    ahp_weights = config.get("ahp_weights", {})
 
     # 1. Prepare Data
-    X_raw = df[features].select_dtypes(include=[np.number]).fillna(0).values
-    X_student = student[features].select_dtypes(include=[np.number]).fillna(0).values
+    X_student = student[features].select_dtypes(include=[np.number]).fillna(0).values[0]
     cluster_idx = int(student["cluster"].values[0])
 
-    # Get centroids from metrics
     centroids = np.array(session.get("metrics", {}).get("centroids", []))
     if len(centroids) == 0:
         raise HTTPException(status_code=400, detail="Centroids tidak ditemukan.")
 
     target_centroid = centroids[cluster_idx]
 
-    # 2. Define Model Function for SHAP
-    # We explain the Negative Euclidean Distance (Higher is better/closer)
-    def model_predict(data_batch):
-        # Apply weights if exist
-        data_weighted = get_weighted_x(data_batch, ahp_weights, features)
-        target_weighted = get_weighted_x(target_centroid.reshape(1, -1), ahp_weights, features)
-
-        # Calculate distance to assigned cluster centroid
-        dists = np.linalg.norm(data_weighted - target_weighted, axis=1)
-        return -dists # Negative because SHAP usually explains "positive" contribution to a score
-
-    # 3. Calculate SHAP Values
-    # Use a small background dataset for KernelExplainer speed
-    bg_data = shap.sample(X_raw, 50) if len(X_raw) > 50 else X_raw
-    explainer = shap.KernelExplainer(model_predict, bg_data)
-    shap_values = explainer.shap_values(X_student)
-
-    # shap_values shape is (1, n_features)
+    # 2. Centroid Affinity Analysis (Vercel-Safe Alternative to SHAP)
+    # This measures which features 'anchor' the student to this specific cluster centroid.
+    # We calculate the relative closeness of each feature to the target centroid.
     contributions = []
+
+    # Calculate feature ranges for normalization
+    X_all = df[features].select_dtypes(include=[np.number]).fillna(0).values
+    ranges = np.ptp(X_all, axis=0) + 1e-10
+
     for i, f in enumerate(features):
+        weight = ahp_weights.get(f, 1.0)
+        # Closeness = 1 - (diff / range)
+        diff = abs(X_student[i] - target_centroid[i])
+        closeness = 1.0 - (diff / ranges[i])
+
+        # Contribution score reflects weight and mathematical proximity
+        score = float(closeness * weight)
+
         contributions.append({
             "feature": f,
-            "val": float(shap_values[0, i]),
-            "abs_val": float(abs(shap_values[0, i]))
+            "val": score,
+            "abs_val": abs(score)
         })
 
-    # Sort by absolute contribution
+    # Sort by contribution strength
+    contributions = sorted(contributions, key=lambda x: x["abs_val"], reverse=True)
+
+    return {
+        "status": "success",
+        "nis": nis,
+        "cluster": cluster_idx,
+        "contributions": contributions,
+        "method": "Centroid Affinity Analysis (Lightweight)",
+        "explanation": f"Variabel '{contributions[0]['feature']}' memiliki kecocokan profil tertinggi yang menempatkan siswa ini di Klaster {cluster_idx + 1}."
+    }
     contributions = sorted(contributions, key=lambda x: x["abs_val"], reverse=True)
 
     return {

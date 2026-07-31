@@ -1,0 +1,12 @@
+.git
+.venv
+__pycache__
+artifacts
+temp
+*.xlsx
+*.csv
+*.txt
+.DS_Store
+.idea
+.gradle
+build
