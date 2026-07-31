@@ -196,8 +196,8 @@ def calculate_cluster_metrics(df, features, assignments, k, weights_dict=None):
                 ith_cluster_sil_values.sort()
                 silhouette_values.append({
                     "cluster": int(i),
-                    "values": [float(v) for x in ith_cluster_sil_values for v in [x]], # flatten
-                    "avg": float(np.mean(ith_cluster_sil_values)) if len(ith_cluster_sil_values) > 0 else 0.0
+                    "values": np.nan_to_num(ith_cluster_sil_values).tolist(),
+                    "avg": float(np.nan_to_num(np.mean(ith_cluster_sil_values))) if len(ith_cluster_sil_values) > 0 else 0.0
                 })
 
         # WCSS Calculation in appropriate space
