@@ -1172,35 +1172,6 @@ async def compare_all(x_session_id: Optional[str] = Header(None)):
         "best_by_dbi": best_dbi_algo
     }
 
-@app.post("/stepwise/ensemble-run/")
-async def ensemble_run(x_session_id: Optional[str] = Header(None)):
-    """Ensemble Clustering: Aggregates results from K-Means and FCM using Consensus Matrix."""
-    await ensure_session(x_session_id)
-    if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
-
-    all_res = sessions[x_session_id].get("all_results", {})
-    if "kmeans" not in all_res or "fcm" not in all_res:
-         # Auto-run both if missing for ensemble? For now, require they be run.
-         raise HTTPException(status_code=400, detail="Ensemble membutuhkan hasil K-Means dan FCM.")
-
-    # Simplified Ensemble: Consensus via Majority Voting or Averaging
-    df = sessions[x_session_id]["df"]
-    # Get labels from results
-    # (In a real app, we'd use a Co-association Matrix)
-    # Here we simulate Ensemble by taking the most stable assignment
-
-    # Just for demonstration of the concept in the UI
-    ensemble_labels = all_res["kmeans"].get("labels", []) # Fallback
-
-    metrics = all_res["kmeans"].copy() # Ensemble metrics are usually better or similar
-    metrics["algorithm"] = "Ensemble (Consensus)"
-
-    sessions[x_session_id]["all_results"]["ensemble"] = metrics
-    add_to_checklist(x_session_id, "Ensemble Consensus")
-    sync_session_to_firebase(x_session_id)
-
-    return {"status": "success", "metrics": metrics}
-
 @app.post("/stepwise/calculate-distances/")
 async def calculate_distances_step(x_session_id: Optional[str] = Header(None)):
     await ensure_session(x_session_id)
@@ -2033,7 +2004,7 @@ async def ai_discussion_generator(x_session_id: Optional[str] = Header(None), la
 
 @app.post("/stepwise/benchmark/")
 async def stepwise_benchmark(x_session_id: Optional[str] = Header(None)):
-    """Scientific comparison of K-Means, FCM, and Ensemble algorithms."""
+    """Scientific comparison of K-Means and FCM algorithms."""
     await ensure_session(x_session_id)
     if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
 
@@ -2110,28 +2081,8 @@ async def stepwise_benchmark(x_session_id: Optional[str] = Header(None)):
         "partition_entropy": pe
     }
 
-    # 3. Ensemble (Consensus) Run
-    # Simplified Ensemble via Majority Voting of both above results
-    from scipy.stats import mode
-    combined_labels = np.array([km_labels, fcm_labels])
-    ensemble_labels, _ = mode(combined_labels, axis=0)
-    ensemble_labels = ensemble_labels.flatten()
-
-    ens_sil = float(silhouette_score(X, ensemble_labels))
-    ens_dbi = float(davies_bouldin_score(X, ensemble_labels))
-    ens_chi = float(calinski_harabasz_score(X, ensemble_labels))
-
-    results["ensemble"] = {
-        "name": "Ensemble (Hybrid)",
-        "silhouette": ens_sil,
-        "dbi": ens_dbi,
-        "chi": ens_chi,
-        "wcss": 0.0, # Not directly applicable
-        "time": float((end_km - start_km) + (end_fcm - start_fcm))
-    }
-
-    # 4. Comparative Conclusion Generator
-    algos = ["kmeans", "fcm", "ensemble"]
+    # 3. Comparative Conclusion Generator
+    algos = ["kmeans", "fcm"]
     best_sil = max(algos, key=lambda x: results[x]["silhouette"])
     best_dbi = min(algos, key=lambda x: results[x]["dbi"])
 
