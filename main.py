@@ -201,7 +201,8 @@ def calculate_cluster_metrics(df, features, assignments, k, weights_dict=None):
                     wcss += np.sum((cluster_points - center)**2)
 
         dist = {str(i): {"count": int(np.sum(assignments == i)), "percentage": float(np.sum(assignments == i) / len(df) * 100)} for i in range(k)}
-        profiles = {str(i): df[assignments == i][features].mean(numeric_only=True).to_dict() for i in range(k)}
+        # JSON SAFETY: Handle empty cluster means
+        profiles = {str(i): df[assignments == i][features].mean(numeric_only=True).fillna(0).to_dict() for i in range(k)}
 
         # Feature Importance & Sensitivity Analysis (Discriminative Power)
         # S2 ENHANCEMENT: Calculate contribution to cluster separation
@@ -965,30 +966,40 @@ async def fcm_iteration_step(x_session_id: Optional[str] = Header(None)):
     sync_session_to_firebase(x_session_id)
     return {
         "status": "success",
-        "iteration": state["iteration"],
-        "diff": float(diff),
-        "is_converged": is_converged,
-        "sample_membership": new_U[:, 0].tolist()
+        "iteration": int(state["iteration"]),
+        "diff": float(np.nan_to_num(diff)),
+        "is_converged": bool(is_converged),
+        "sample_membership": np.nan_to_num(new_U[:, 0]).tolist()
     }
 
 def calculate_ahp_weights_and_cr(matrix):
-    n = len(matrix)
-    # Calculate Eigenvector (Weights) using Column Normalization
-    col_sum = np.sum(matrix, axis=0)
-    norm_matrix = matrix / col_sum
-    weights = np.mean(norm_matrix, axis=1)
+    """Calculates AHP weights and consistency ratio with NaN/Inf protection."""
+    try:
+        n = len(matrix)
+        # Calculate Eigenvector (Weights) using Column Normalization
+        col_sum = np.sum(matrix, axis=0)
+        col_sum = np.where(col_sum == 0, 1e-10, col_sum)
+        norm_matrix = matrix / col_sum
+        weights = np.mean(norm_matrix, axis=1)
 
-    # Consistency Ratio (CR) Check
-    # λ_max = Average of (Aw)_i / w_i
-    aw = matrix @ weights
-    λ_max = np.mean(aw / weights)
+        # Ensure weights are not zero for division
+        weights_safe = np.where(weights == 0, 1e-10, weights)
 
-    ci = (λ_max - n) / (n - 1) if n > 1 else 0
-    ri_table = {1:0, 2:0, 3:0.58, 4:0.9, 5:1.12, 6:1.24, 7:1.32, 8:1.41, 9:1.45, 10:1.49}
-    ri = ri_table.get(n, 1.49)
-    cr = ci / ri if ri > 0 else 0
+        # Consistency Ratio (CR) Check
+        # λ_max = Average of (Aw)_i / w_i
+        aw = matrix @ weights
+        λ_max = np.mean(aw / weights_safe)
 
-    return weights, cr
+        ci = (λ_max - n) / (n - 1) if n > 1 else 0
+        ri_table = {1:0, 2:0, 3:0.58, 4:0.9, 5:1.12, 6:1.24, 7:1.32, 8:1.41, 9:1.45, 10:1.49}
+        ri = ri_table.get(n, 1.49)
+        cr = ci / ri if ri > 0 else 0
+
+        # JSON Safety: clean outputs
+        return np.nan_to_num(weights), float(np.nan_to_num(cr))
+    except Exception as e:
+        print(f"AHP Calculation Error: {e}")
+        return np.ones(len(matrix))/len(matrix), 0.0
 
 @app.post("/stepwise/ahp-calculate/")
 async def ahp_calculate(x_session_id: Optional[str] = Header(None), params: Dict[str, Any] = Body(...)):
@@ -1023,22 +1034,23 @@ async def ahp_calculate(x_session_id: Optional[str] = Header(None), params: Dict
             "is_consistent": bool(cr < 0.1)
         })
 
-    # 2. Consensus Aggregation: Geometric Mean of Matrices
+    # 2. Consensus Aggregation: Geometric Mean of Matrices (S2 Robust)
     # a_ij^Group = (prod(a_ij^k)) ^ (1/m)
     stacked_matrices = np.stack(matrices)
-    consensus_matrix = np.exp(np.mean(np.log(stacked_matrices), axis=0))
+    # Avoid log(0) with fmax
+    consensus_matrix = np.exp(np.mean(np.log(np.fmax(stacked_matrices, 1e-10)), axis=0))
 
     # 3. Calculate Group Weights and Group CR
     group_weights, group_cr = calculate_ahp_weights_and_cr(consensus_matrix)
 
-    weight_dict = {f: float(w) for f, w in zip(features, group_weights)}
+    weight_dict = {f: float(np.nan_to_num(w)) for f, w in zip(features, group_weights)}
 
     sessions[x_session_id]["config"]["ahp_weights"] = weight_dict
-    sessions[x_session_id]["config"]["ahp_cr"] = float(group_cr)
+    sessions[x_session_id]["config"]["ahp_cr"] = float(np.nan_to_num(group_cr))
     sessions[x_session_id]["config"]["expert_consensus"] = {
         "count": len(matrices),
         "individual_status": expert_results,
-        "group_cr": float(group_cr)
+        "group_cr": float(np.nan_to_num(group_cr))
     }
 
     add_to_checklist(x_session_id, f"AHP Konsensus ({len(matrices)} Pakar)")
@@ -1047,8 +1059,8 @@ async def ahp_calculate(x_session_id: Optional[str] = Header(None), params: Dict
     return {
         "status": "success",
         "weights": weight_dict,
-        "consistency_ratio": float(group_cr),
-        "is_consistent": group_cr < 0.1,
+        "consistency_ratio": float(np.nan_to_num(group_cr)),
+        "is_consistent": bool(group_cr < 0.1),
         "expert_details": expert_results,
         "message": f"Bobot konsensus {len(matrices)} pakar berhasil dihitung." if group_cr < 0.1 else "Peringatan: Konsensus grup tidak konsisten (CR > 0.1)."
     }
@@ -1298,7 +1310,9 @@ async def auto_converge(x_session_id: Optional[str] = Header(None)):
         for i in range(start_iter + 1, start_iter + max_iter + 1):
             # Update Centers
             U_m = U ** m
-            centers = (U_m @ X) / (U_m.sum(axis=1)[:, np.newaxis] + 1e-10)
+            # S2 HARDENING: add small epsilon to denominator
+            denom_centers = U_m.sum(axis=1)[:, np.newaxis] + 1e-10
+            centers = (U_m @ X) / denom_centers
 
             # Update U
             dists = np.linalg.norm(X[:, np.newaxis] - centers, axis=2)
@@ -1307,12 +1321,13 @@ async def auto_converge(x_session_id: Optional[str] = Header(None)):
 
             # Vectorized new_U calculation (Revision V3.4)
             inv_dists = dists ** (-power)
-            new_U_T = inv_dists / (inv_dists.sum(axis=1)[:, np.newaxis] + 1e-10)
+            denom_u = inv_dists.sum(axis=1)[:, np.newaxis] + 1e-10
+            new_U_T = inv_dists / denom_u
             new_U = new_U_T.T
 
             diff = np.linalg.norm(new_U - U)
             U = new_U
-            history.append({"iter": i, "diff": float(diff)})
+            history.append({"iter": i, "diff": float(np.nan_to_num(diff))})
             if diff < 1e-4: break
 
         end_time = time.time()
