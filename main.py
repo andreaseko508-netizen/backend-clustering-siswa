@@ -205,10 +205,12 @@ def calculate_cluster_metrics(df, features, assignments, k, weights_dict=None):
 
         # Feature Importance & Sensitivity Analysis (Discriminative Power)
         # S2 ENHANCEMENT: Calculate contribution to cluster separation
+        # JSON SAFETY: Force conversion to float and handle NaN
         centroid_matrix = np.array([profiles[str(i)].get(f, 0) for i in range(k) for f in features]).reshape(k, -1)
+        centroid_matrix = np.nan_to_num(centroid_matrix)
         variances = np.var(centroid_matrix, axis=0)
         importance_sum = np.sum(variances) if np.sum(variances) > 0 else 1.0
-        feature_importance = {f: float((v / importance_sum) * 100) for f, v in zip(features, variances)}
+        feature_importance = {f: float(np.nan_to_num((v / importance_sum) * 100)) for f, v in zip(features, variances)}
 
         # Purity Audit: Variable that might be harming Silhouette
         harmful_features = [f for f, imp in feature_importance.items() if imp < 5.0]
@@ -250,33 +252,36 @@ def calculate_cluster_metrics(df, features, assignments, k, weights_dict=None):
         return {"davies_bouldin_index": 0.0, "silhouette_score": 0.0, "calinski_harabasz_index": 0.0, "wcss": 0.0, "distribution": {}, "cluster_profiles": {}, "dbi": 0.0}
 
 def calculate_xie_beni(X, U, centers, m):
-    """Calculates Xie-Beni Index for Fuzzy C-Means validation."""
-    n_samples = X.shape[0]
-    k = centers.shape[0]
+    """Calculates Xie-Beni Index for Fuzzy C-Means validation (S2 Hardened)."""
+    try:
+        n_samples = X.shape[0]
+        k = centers.shape[0]
 
-    # 1. Total Variation (Numerator)
-    # dists[i, j] = ||x_i - v_j||^2
-    dists_sq = np.sum((X[:, np.newaxis] - centers)**2, axis=2)
-    numerator = np.sum((U**m).T * dists_sq)
+        # 1. Total Variation (Numerator)
+        dists_sq = np.sum((X[:, np.newaxis] - centers)**2, axis=2)
+        numerator = np.sum((U**m).T * dists_sq)
 
-    # 2. Minimum separation between cluster centers (Denominator)
-    # centers_dist[j, l] = ||v_j - v_l||^2
-    centers_dist_sq = np.sum((centers[:, np.newaxis] - centers)**2, axis=2)
-    # Fill diagonal with infinity to find min of non-zero distances
-    np.fill_diagonal(centers_dist_sq, np.inf)
-    min_sep = np.min(centers_dist_sq)
+        # 2. Minimum separation between cluster centers (Denominator)
+        centers_dist_sq = np.sum((centers[:, np.newaxis] - centers)**2, axis=2)
+        np.fill_diagonal(centers_dist_sq, np.inf)
+        min_sep = np.min(centers_dist_sq)
 
-    xb = numerator / (n_samples * min_sep + 1e-10)
-    return float(xb)
+        xb = numerator / (n_samples * min_sep + 1e-10)
+        return float(np.nan_to_num(xb))
+    except Exception as e:
+        print(f"XB Index Error: {e}")
+        return 0.0
 
 def calculate_partition_entropy(U):
-    """Calculates Partition Entropy (PE) to measure fuzzy clustering clarity."""
-    n_samples = U.shape[1]
-    # PE = -1/n * sum(sum(u_ij * log(u_ij)))
-    # Avoid log(0)
-    U_safe = np.fmax(U, 1e-10)
-    pe = -np.sum(U * np.log(U_safe)) / n_samples
-    return float(pe)
+    """Calculates Partition Entropy (PE) with NaN protection."""
+    try:
+        n_samples = U.shape[1]
+        U_safe = np.fmax(U, 1e-10)
+        pe = -np.sum(U * np.log(U_safe)) / n_samples
+        return float(np.nan_to_num(pe))
+    except Exception as e:
+        print(f"PE Index Error: {e}")
+        return 0.0
 
 # --- ENDPOINTS ---
 
@@ -595,9 +600,19 @@ async def get_checkpoints(x_session_id: Optional[str] = Header(None)):
 
 @app.get("/stepwise/universal-dataset/")
 async def get_universal_dataset(x_session_id: Optional[str] = Header(None)):
+    """Fetches the current state of the dataset with JSON-safety (NaN replacement)."""
     await ensure_session(x_session_id)
     if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
-    return {"columns": list(sessions[x_session_id]["df"].columns), "data": sessions[x_session_id]["df"].head(500).to_dict(orient="records")}
+
+    # JSON SAFETY: Clean DataFrame before to_dict
+    df = sessions[x_session_id]["df"]
+    df_cleaned = df.replace([np.inf, -np.inf], np.nan).fillna(0)
+
+    return {
+        "status": "success",
+        "columns": list(df.columns),
+        "data": df_cleaned.head(500).to_dict(orient="records")
+    }
 
 @app.get("/stepwise/session-state/")
 async def get_session_state(x_session_id: Optional[str] = Header(None)):
@@ -1740,6 +1755,9 @@ async def get_final_analysis(x_session_id: Optional[str] = Header(None)):
     metrics = session.get("metrics", {})
 
     # Android compatibility fix: ensure key consistency
+    # JSON SAFETY: Clean DataFrame before to_dict
+    df_cleaned = session["df"].replace([np.inf, -np.inf], np.nan).fillna(0)
+
     result = {
         "status": "success",
         "jumlah_data": len(session["df"]),
@@ -1756,7 +1774,7 @@ async def get_final_analysis(x_session_id: Optional[str] = Header(None)):
         "feature_importance": metrics.get("feature_importance", {}),
         "centroids": metrics.get("centroids", []),
         "feature_names": metrics.get("feature_names", list(session["df"].select_dtypes(include=[np.number]).columns)),
-        "hasil_cluster": session["df"].to_dict(orient="records")
+        "hasil_cluster": df_cleaned.to_dict(orient="records")
     }
     return result
 
