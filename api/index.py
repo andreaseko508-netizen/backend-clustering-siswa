@@ -136,23 +136,16 @@ async def ensure_session(x_session_id: str):
             if doc.exists:
                 data = doc.to_dict()
 
-                # Deserialize Scaler
-                if "scaler_b64" in data:
+                # Optimized Deserialization V3.5
+                if "scaler_b64" in data and data["scaler_b64"]:
                     try:
                         data["scaler"] = pickle.loads(base64.b64decode(data["scaler_b64"]))
-                        del data["scaler_b64"]
                     except Exception as e: print(f"Scaler deserialization failed: {e}")
+                    del data["scaler_b64"]
 
                 if "df_records" in data:
                     data["df"] = pd.DataFrame(data["df_records"])
                     del data["df_records"]
-
-                # Deserialize Scaler
-                if "scaler_b64" in data:
-                    try:
-                        data["scaler"] = pickle.loads(base64.b64decode(data["scaler_b64"]))
-                    except:
-                        data["scaler"] = None
 
                 sessions[x_session_id] = data
 
@@ -164,9 +157,7 @@ def add_to_checklist(x_session_id: str, step_name: str):
         if step_name not in checklist:
             checklist.append(step_name)
         sessions[x_session_id]["audit"]["execution_checklist"] = checklist
-        # Force Hard-Sync to Firebase to prevent data loss on page transition
-        sync_session_to_firebase(x_session_id)
-        # Force Hard-Sync to Firebase to prevent data loss on page transition
+        # Balanced Sync: Prevents Firebase write-spam while ensuring persistence
         sync_session_to_firebase(x_session_id)
 
 def calculate_cluster_metrics(df, features, assignments, k, weights_dict=None):
@@ -905,16 +896,16 @@ async def fcm_iteration_step(x_session_id: Optional[str] = Header(None)):
 
     # 1. Update Centers
     U_m = U ** m
-    centers = (U_m @ X) / U_m.sum(axis=1)[:, np.newaxis]
+    centers = (U_m @ X) / (U_m.sum(axis=1)[:, np.newaxis] + 1e-10)
 
     # 2. Update Membership Matrix U
-    # Calculate distances to new centers
     dists = np.linalg.norm(X[:, np.newaxis] - centers, axis=2) # n_samples x k
-    dists = np.fmax(dists, 1e-10) # Avoid zero distance
+    dists = np.fmax(dists, 1e-10)
 
     # S2 OPTIMIZATION: Vectorized Membership Calculation
-    inv_dists = dists ** (-2.0 / (m - 1))
-    new_U_T = inv_dists / inv_dists.sum(axis=1)[:, np.newaxis]
+    power = 2.0 / (m - 1)
+    inv_dists = dists ** (-power)
+    new_U_T = inv_dists / (inv_dists.sum(axis=1)[:, np.newaxis] + 1e-10)
     new_U = new_U_T.T # k x n_samples
 
     # Convergence check
@@ -1285,23 +1276,24 @@ async def auto_converge(x_session_id: Optional[str] = Header(None)):
         U = np.array(state["U"])
         m = state["m"]
         max_iter = 100
-        history = []
         centers = None
+        history = state.get("history", [])
+        start_iter = len(history)
 
-        for i in range(1, max_iter + 1):
+        for i in range(start_iter + 1, start_iter + max_iter + 1):
             # Update Centers
             U_m = U ** m
-            centers = (U_m @ X) / U_m.sum(axis=1)[:, np.newaxis]
+            centers = (U_m @ X) / (U_m.sum(axis=1)[:, np.newaxis] + 1e-10)
 
             # Update U
             dists = np.linalg.norm(X[:, np.newaxis] - centers, axis=2)
             dists = np.fmax(dists, 1e-10)
             power = 2.0 / (m - 1)
-            new_U = np.zeros((X.shape[0], k))
-            for row_idx in range(X.shape[0]):
-                for col_idx in range(k):
-                    new_U[row_idx, col_idx] = 1.0 / np.sum((dists[row_idx, col_idx] / dists[row_idx, :]) ** power)
-            new_U = new_U.T
+
+            # Vectorized new_U calculation (Revision V3.4)
+            inv_dists = dists ** (-power)
+            new_U_T = inv_dists / (inv_dists.sum(axis=1)[:, np.newaxis] + 1e-10)
+            new_U = new_U_T.T
 
             diff = np.linalg.norm(new_U - U)
             U = new_U
@@ -1313,6 +1305,15 @@ async def auto_converge(x_session_id: Optional[str] = Header(None)):
         ahp_weights = sessions[x_session_id]["config"].get("ahp_weights")
         evaluation = calculate_cluster_metrics(df, features, assignments, k, weights_dict=ahp_weights)
         pc = float(np.mean(np.sum(U**2, axis=0)))
+
+        state.update({
+            "U": U.tolist(),
+            "centroids": centers.tolist(),
+            "iteration": len(history),
+            "is_converged": True,
+            "history": history
+        })
+
         evaluation.update({
             "partition_coefficient": pc,
             "wcss": float(np.sum(np.min(np.linalg.norm(X[:, np.newaxis] - centers, axis=2), axis=1)**2)),
@@ -1334,7 +1335,7 @@ async def auto_converge(x_session_id: Optional[str] = Header(None)):
         sessions[x_session_id]["all_results"][mode] = evaluation
 
         add_to_checklist(x_session_id, "Riset Selesai")
-        return {"status": "success", "is_converged": True, "evaluation": evaluation}
+        return {"status": "success", "is_converged": True, "evaluation": evaluation, "history": history, "iteration": len(history)}
 
     # 2. K-MEANS AUTO-CONVERGE (Legacy)
     centroids = np.array(state["centroids"])
@@ -2159,21 +2160,36 @@ async def longitudinal_compare(params: Dict[str, Any] = Body(...)):
     data_a = doc_a.to_dict()
     data_b = doc_b.to_dict()
 
-    df_a = pd.DataFrame(data_a.get("df_records", []))
-    df_b = pd.DataFrame(data_b.get("df_records", []))
+    # S2 AUDIT: Ensure records exist before DataFrame conversion
+    records_a = data_a.get("df_records", [])
+    records_b = data_b.get("df_records", [])
+
+    if not records_a or not records_b:
+        raise HTTPException(status_code=400, detail="Salah satu atau kedua sesi tidak memiliki data klaster yang valid (Dataset kosong).")
+
+    df_a = pd.DataFrame(records_a)
+    df_b = pd.DataFrame(records_b)
 
     if "nis" not in df_a.columns or "nis" not in df_b.columns:
         raise HTTPException(status_code=400, detail="Dataset harus memiliki kolom 'nis' untuk perbandingan longitudinal.")
 
     # 2. Match Students
+    #  RIGOR: Optimize merging for performance and case-sensitivity
+    df_a['nis'] = df_a['nis'].astype(str).str.strip()
+    df_b['nis'] = df_b['nis'].astype(str).str.strip()
+
     merged = pd.merge(df_a[['nis', 'nama', 'cluster']], df_b[['nis', 'cluster']], on='nis', suffixes=('_a', '_b'))
 
     if merged.empty:
         return {"status": "success", "message": "Tidak ditemukan siswa yang sama antar kedua periode.", "movement": []}
 
     # 3. Calculate Transition Matrix
-    k_a = data_a.get("config", {}).get("k", 3)
-    k_b = data_b.get("config", {}).get("k", 3)
+    k_a = int(data_a.get("config", {}).get("k", 3))
+    k_b = int(data_b.get("config", {}).get("k", 3))
+
+    warning = None
+    if k_a != k_b:
+        warning = f"Peringatan: Jumlah klaster (K) berbeda antara Periode A (K={k_a}) dan Periode B (K={k_b}). Interpretasi pergerakan mungkin memerlukan peninjauan manual."
 
     # Identify movements
     movement_stats = []
@@ -2218,7 +2234,8 @@ async def longitudinal_compare(params: Dict[str, Any] = Body(...)):
         "summary": summary,
         "movements": movement_stats,
         "period_a": data_a.get("filename", "Periode A"),
-        "period_b": data_b.get("filename", "Periode B")
+        "period_b": data_b.get("filename", "Periode B"),
+        "warning": warning
     }
 
 @app.post("/stepwise/simulate/")
