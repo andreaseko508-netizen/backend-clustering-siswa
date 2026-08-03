@@ -98,6 +98,7 @@ class ResearchReportPDF(FPDF):
         self.ln(5)
 
 sessions: Dict[str, Dict[str, Any]] = {}
+audit_checkpoints: Dict[str, Dict[str, pd.DataFrame]] = {}
 
 def sync_session_to_firebase(session_id: str):
     if not db or session_id not in sessions: return
@@ -343,6 +344,11 @@ async def stepwise_upload(file: UploadFile = File(...), x_session_id: Optional[s
             "checkpoints": {"Data Asli": initial_preview},
             "audit": {"initial_rows": len(df), "initial_cols": len(df.columns), "missing_before": int(df.isnull().sum().sum()), "outliers_removed": 0, "normalization_method": "None", "execution_checklist": []}
         }
+
+        # S2 Rigor: Capture 100% Data for Excel Audit Trail
+        if x_session_id not in audit_checkpoints: audit_checkpoints[x_session_id] = {}
+        audit_checkpoints[x_session_id]["01_Data_Asli"] = df.copy()
+
         sync_session_to_firebase(x_session_id)
         return {"status": "success", "jumlah_data": len(df), "columns": list(df.columns), "session_id": x_session_id}
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
@@ -387,6 +393,11 @@ async def stepwise_cleaning(x_session_id: Optional[str] = Header(None)):
     sessions[x_session_id]["df"] = df
 
     sessions[x_session_id]["checkpoints"]["Pembersihan Data (Sesudah)"] = get_representative_data(df)
+
+    # S2 Rigor: Capture 100% Data after Cleaning
+    if x_session_id not in audit_checkpoints: audit_checkpoints[x_session_id] = {}
+    audit_checkpoints[x_session_id]["04_Data_Cleaning"] = df.copy()
+
     add_to_checklist(x_session_id, "Pembersihan Data")
     sync_session_to_firebase(x_session_id)
     return {"status": "success", "final_rows": len(df), "log": f"Cleaning selesai."}
@@ -401,6 +412,11 @@ async def stepwise_missing(x_session_id: Optional[str] = Header(None)):
     for col in num_cols: df[col] = df[col].fillna(df[col].median())
     sessions[x_session_id]["df"] = df
     sessions[x_session_id]["checkpoints"]["Imputasi Nilai Kosong (Sesudah)"] = get_representative_data(df)
+
+    # S2 Rigor: Capture 100% Data after Imputation
+    if x_session_id not in audit_checkpoints: audit_checkpoints[x_session_id] = {}
+    audit_checkpoints[x_session_id]["05_Imputasi_Data"] = df.copy()
+
     add_to_checklist(x_session_id, "Imputasi Data")
     sync_session_to_firebase(x_session_id)
     return {"status": "success"}
@@ -459,6 +475,11 @@ async def stepwise_outlier(x_session_id: Optional[str] = Header(None)):
     outliers_mask = iqr_mask | z_mask | m_mask
 
     sessions[x_session_id]["checkpoints"]["Deteksi Outlier (Sesudah)"] = get_representative_data(df[~outliers_mask])
+
+    # S2 Rigor: Capture 100% Data after Outlier Audit
+    if x_session_id not in audit_checkpoints: audit_checkpoints[x_session_id] = {}
+    audit_checkpoints[x_session_id]["06_Audit_Outlier"] = df[~outliers_mask].copy()
+
     add_to_checklist(x_session_id, "Audit Outlier")
     sync_session_to_firebase(x_session_id)
 
@@ -490,6 +511,11 @@ async def stepwise_conversion(x_session_id: Optional[str] = Header(None)):
         mapping_details[col] = {str(i): str(val) for i, val in enumerate(uniques)}
     sessions[x_session_id]["df"] = df
     sessions[x_session_id]["checkpoints"]["Konversi Kategorikal (Sesudah)"] = get_representative_data(df)
+
+    # S2 Rigor: Capture 100% Data after Conversion
+    if x_session_id not in audit_checkpoints: audit_checkpoints[x_session_id] = {}
+    audit_checkpoints[x_session_id]["03_Konversi_Kategori"] = df.copy()
+
     add_to_checklist(x_session_id, "Konversi Fitur")
     sync_session_to_firebase(x_session_id)
     return {"status": "success", "mappings": mapping_details}
@@ -531,6 +557,11 @@ async def stepwise_norm(x_session_id: Optional[str] = Header(None)):
         sessions[x_session_id]["df"] = df
         sessions[x_session_id]["scaler"] = scaler # Store for simulation
         sessions[x_session_id]["checkpoints"]["Normalisasi Min-Max (Sesudah)"] = get_representative_data(df)
+
+        # S2 Rigor: Capture 100% Data after Scaling
+        if x_session_id not in audit_checkpoints: audit_checkpoints[x_session_id] = {}
+        audit_checkpoints[x_session_id]["07_Penskalaan_Fitur"] = df.copy()
+
         add_to_checklist(x_session_id, "Normalisasi Data")
         sync_session_to_firebase(x_session_id)
     return {"status": "success"}
@@ -548,6 +579,11 @@ async def stepwise_standard(x_session_id: Optional[str] = Header(None)):
         sessions[x_session_id]["df"] = df
         sessions[x_session_id]["scaler"] = scaler # Store for simulation
         sessions[x_session_id]["checkpoints"]["Standardisasi Z-Score (Sesudah)"] = get_representative_data(df)
+
+        # S2 Rigor: Capture 100% Data after Standardization
+        if x_session_id not in audit_checkpoints: audit_checkpoints[x_session_id] = {}
+        audit_checkpoints[x_session_id]["07_Penskalaan_Fitur"] = df.copy()
+
         add_to_checklist(x_session_id, "Standardisasi Data")
         sync_session_to_firebase(x_session_id)
     return {"status": "success"}
@@ -566,6 +602,11 @@ async def stepwise_robust_scaling(x_session_id: Optional[str] = Header(None)):
         sessions[x_session_id]["df"] = df
         sessions[x_session_id]["scaler"] = scaler
         sessions[x_session_id]["checkpoints"]["Robust Scaling (Sesudah)"] = get_representative_data(df)
+
+        # S2 Rigor: Capture 100% Data after Robust Scaling
+        if x_session_id not in audit_checkpoints: audit_checkpoints[x_session_id] = {}
+        audit_checkpoints[x_session_id]["07_Penskalaan_Fitur"] = df.copy()
+
         add_to_checklist(x_session_id, "Robust Scaling")
         sync_session_to_firebase(x_session_id)
     return {"status": "success", "message": "Robust Scaling (Median-IQR) berhasil diterapkan."}
@@ -697,6 +738,11 @@ async def init_centroids_step(x_session_id: Optional[str] = Header(None), params
     centroids = num_df.sample(n=k, random_state=42).values.tolist()
 
     sessions[x_session_id]["algo_state"] = {"iteration": 0, "centroids": centroids, "features": features, "k": k, "history": [], "is_converged": False}
+
+    # S2 Rigor: Capture 100% Centroids for Excel Audit Trail
+    if x_session_id not in audit_checkpoints: audit_checkpoints[x_session_id] = {}
+    audit_checkpoints[x_session_id]["10_Inisialisasi_Centroid"] = pd.DataFrame(centroids, columns=features)
+
     add_to_checklist(x_session_id, "Centroid Init")
     sync_session_to_firebase(x_session_id)
     return {"status": "success", "centroids": centroids, "features": features, "message": "Inisialisasi berhasil."}
@@ -743,6 +789,10 @@ async def fcm_init_step(x_session_id: Optional[str] = Header(None), params: Dict
     for j in range(k):
         df[f"membership_c{j}"] = np.round(U[j, :], 4).tolist()
     sessions[x_session_id]["df"] = df
+
+    # S2 Rigor: Capture 100% Matrix U for Excel Audit Trail
+    if x_session_id not in audit_checkpoints: audit_checkpoints[x_session_id] = {}
+    audit_checkpoints[x_session_id]["10_Inisialisasi_FCM_Matrix_U"] = pd.DataFrame(U.T, columns=[f"C{i+1}" for i in range(k)])
 
     add_to_checklist(x_session_id, "Inisialisasi FCM")
     sync_session_to_firebase(x_session_id)
@@ -829,6 +879,10 @@ async def fcm_calc_centers_step(x_session_id: Optional[str] = Header(None)):
 
     state["centroids"] = centers.tolist()
 
+    # S2 Rigor: Capture 100% Data for Excel (Step 13: Pembaruan Pusat)
+    if x_session_id not in audit_checkpoints: audit_checkpoints[x_session_id] = {}
+    audit_checkpoints[x_session_id]["13_Pembaruan_Pusat_FCM"] = pd.DataFrame(centers, columns=state["features"])
+
     # Round for UI
     rounded_centers = np.round(centers, 4).tolist()
 
@@ -876,6 +930,10 @@ async def fcm_update_u_step(x_session_id: Optional[str] = Header(None)):
     state["U"] = new_U.tolist()
     state["iteration"] += 1
     state["history"].append({"iter": state["iteration"], "diff": float(diff)})
+
+    # S2 Rigor: Capture 100% Matrix U for Excel (Step 11: Matriks Jarak/Keanggotaan)
+    if x_session_id not in audit_checkpoints: audit_checkpoints[x_session_id] = {}
+    audit_checkpoints[x_session_id]["11_Matriks_Keanggotaan_FCM"] = pd.DataFrame(new_U.T, columns=[f"C{i+1}" for i in range(k)])
 
     # Merge updated membership into dataframe for UI preview
     for j in range(k):
@@ -930,6 +988,11 @@ async def fcm_iteration_step(x_session_id: Optional[str] = Header(None)):
     state["centroids"] = centers.tolist()
     state["iteration"] += 1
     state["history"].append({"iter": state["iteration"], "diff": float(diff)})
+
+    # S2 Rigor: Capture 100% FCM State for Excel Audit Trail
+    if x_session_id not in audit_checkpoints: audit_checkpoints[x_session_id] = {}
+    # Store Centroids (V) and Membership (U) in one sheet or separate
+    audit_checkpoints[x_session_id][f"13_FCM_Update_Iter_{state['iteration']}"] = pd.DataFrame(centers, columns=state["features"])
 
     is_converged = diff < 1e-4
     state["is_converged"] = is_converged
@@ -1052,6 +1115,10 @@ async def ahp_calculate(x_session_id: Optional[str] = Header(None), params: Dict
         "individual_status": expert_results,
         "group_cr": float(np.nan_to_num(group_cr))
     }
+
+    # S2 Rigor: Capture 100% Data after Weighting
+    if x_session_id not in audit_checkpoints: audit_checkpoints[x_session_id] = {}
+    audit_checkpoints[x_session_id]["08_Pembobotan_Variabel"] = pd.DataFrame(list(weight_dict.items()), columns=["Variabel", "Bobot_Absolut"])
 
     add_to_checklist(x_session_id, f"AHP Konsensus ({len(matrices)} Pakar)")
     sync_session_to_firebase(x_session_id)
@@ -1221,6 +1288,11 @@ async def calculate_distances_step(x_session_id: Optional[str] = Header(None)):
         distances = [np.linalg.norm(centroids - row, axis=1).tolist() for row in X]
 
     state["distances"] = distances
+
+    # S2 Rigor: Capture 100% Distance Matrix for Excel Audit Trail
+    if x_session_id not in audit_checkpoints: audit_checkpoints[x_session_id] = {}
+    audit_checkpoints[x_session_id]["11_Matriks_Jarak"] = pd.DataFrame(distances, columns=[f"C{i+1}" for i in range(state['k'])])
+
     add_to_checklist(x_session_id, "Euclidean Distance")
     sync_session_to_firebase(x_session_id)
     return {"status": "success", "distance_matrix_sample": distances[:5], "sample_work": {"distances": distances[0]}}
@@ -1234,6 +1306,11 @@ async def assign_clusters_step(x_session_id: Optional[str] = Header(None)):
     assignments = np.argmin(distances, axis=1).tolist()
     state["assignments"] = assignments
     state["current_wcss"] = float(np.sum(np.min(distances, axis=1)**2))
+
+    # S2 Rigor: Capture 100% Assignment for Excel Audit Trail
+    if x_session_id not in audit_checkpoints: audit_checkpoints[x_session_id] = {}
+    audit_checkpoints[x_session_id]["12_Pengelompokan_Siswa"] = pd.DataFrame(assignments, columns=["Cluster_Assigned"])
+
     counts = {str(i): int(np.sum(np.array(assignments) == i)) for i in range(state["k"])}
     add_to_checklist(x_session_id, "Cluster Assignment")
     sync_session_to_firebase(x_session_id)
@@ -1255,6 +1332,11 @@ async def update_centroids_step(x_session_id: Optional[str] = Header(None)):
     state["centroids"] = new_centroids
     state["iteration"] += 1
     state["history"].append({"iter": state["iteration"], "wcss": state.get("current_wcss", 0.0), "movement": movement})
+
+    # S2 Rigor: Capture 100% Centroids after Update for Excel Audit Trail
+    if x_session_id not in audit_checkpoints: audit_checkpoints[x_session_id] = {}
+    audit_checkpoints[x_session_id][f"13_Update_Centroid_Iter_{state['iteration']}"] = pd.DataFrame(new_centroids, columns=state["features"])
+
     add_to_checklist(x_session_id, f"Centroid Update #{state['iteration']}")
     sync_session_to_firebase(x_session_id)
     return {"status": "success", "new_centroids": new_centroids, "iteration": state["iteration"], "movement": movement, "sample_work": {"explanation": "Centroid baru dihitung dari rata-rata anggota cluster."}}
@@ -1280,6 +1362,10 @@ async def check_convergence(x_session_id: Optional[str] = Header(None)):
         # Save to Multi-Algorithm History
         mode = sessions[x_session_id].get("config", {}).get("mode", "kmeans")
         sessions[x_session_id]["all_results"][mode] = evaluation
+
+        # S2 Rigor: Capture 100% Final Metrics for Excel Audit Trail
+        if x_session_id not in audit_checkpoints: audit_checkpoints[x_session_id] = {}
+        audit_checkpoints[x_session_id]["14_Stabilitas_Konvergensi"] = pd.DataFrame(state["history"])
 
         add_to_checklist(x_session_id, "Convergence Reached")
 
@@ -1364,6 +1450,11 @@ async def auto_converge(x_session_id: Optional[str] = Header(None)):
         mode = sessions[x_session_id].get("config", {}).get("mode", "fcm")
         sessions[x_session_id]["all_results"][mode] = evaluation
 
+        # S2 Rigor: Capture 100% Final FCM State for Excel Audit Trail
+        if x_session_id not in audit_checkpoints: audit_checkpoints[x_session_id] = {}
+        audit_checkpoints[x_session_id]["14_Stabilitas_Konvergensi_Fuzzy"] = pd.DataFrame(history)
+        audit_checkpoints[x_session_id]["15_Hasil_Rekomendasi_SPK"] = df.copy()
+
         add_to_checklist(x_session_id, "Riset Selesai")
         return {"status": "success", "is_converged": True, "evaluation": evaluation, "history": history, "iteration": len(history)}
 
@@ -1423,6 +1514,10 @@ async def auto_converge(x_session_id: Optional[str] = Header(None)):
     mode = sessions[x_session_id].get("config", {}).get("mode", "kmeans")
     sessions[x_session_id]["all_results"][mode] = evaluation
 
+    # S2 Rigor: Capture 100% Final K-Means State for Excel Audit Trail
+    if x_session_id not in audit_checkpoints: audit_checkpoints[x_session_id] = {}
+    audit_checkpoints[x_session_id]["14_Stabilitas_Konvergensi"] = pd.DataFrame(history)
+
     add_to_checklist(x_session_id, "Riset Selesai")
     sync_session_to_firebase(x_session_id)
     return {"status": "success", "is_converged": True, "iteration": state["iteration"], "history": history, "centroids": state["centroids"], "evaluation": evaluation}
@@ -1456,6 +1551,10 @@ async def run_kmeans_step(x_session_id: Optional[str] = Header(None), params: Di
 
     sessions[x_session_id].update({"df": df, "metrics": metrics})
     sessions[x_session_id]["all_results"]["kmeans"] = metrics
+
+    # S2 Rigor: Capture 100% Data after Final Run
+    if x_session_id not in audit_checkpoints: audit_checkpoints[x_session_id] = {}
+    audit_checkpoints[x_session_id]["15_Hasil_Rekomendasi_SPK"] = df.copy()
 
     add_to_checklist(x_session_id, "K-Means Selesai")
     sync_session_to_firebase(x_session_id)
@@ -2131,11 +2230,30 @@ async def stepwise_benchmark(x_session_id: Optional[str] = Header(None)):
     return {"status": "success", "results": results, "comparison": comparison}
 
 @app.post("/stepwise/save_config/")
+async def stepwise_save_config(x_session_id: Optional[str] = Header(None), config: Dict[str, Any] = Body(...)):
+    await ensure_session(x_session_id)
+    if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
+    sessions[x_session_id]["config"].update(config)
+
+    # S2 Rigor: Capture 100% Config for Excel Audit Trail
+    if x_session_id not in audit_checkpoints: audit_checkpoints[x_session_id] = {}
+    audit_checkpoints[x_session_id]["09_Konfigurasi_Algoritma"] = pd.DataFrame(list(config.items()), columns=["Parameter", "Nilai"])
+
+    sync_session_to_firebase(x_session_id)
+    return {"status": "success"}
+
 @app.post("/stepwise/mapping-config/")
 async def stepwise_mapping(x_session_id: Optional[str] = Header(None), config: Dict[str, Any] = Body(...)):
     await ensure_session(x_session_id)
     if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
     sessions[x_session_id]["config"].update(config)
+
+    # S2 Rigor: Capture 100% Data after Selection
+    if x_session_id not in audit_checkpoints: audit_checkpoints[x_session_id] = {}
+    features = config.get("features", [])
+    if features:
+        audit_checkpoints[x_session_id]["02_Seleksi_Variabel"] = sessions[x_session_id]["df"][features].copy()
+
     sync_session_to_firebase(x_session_id)
     return {"status": "success"}
 
@@ -2391,15 +2509,45 @@ async def simulate_policy_intervention(x_session_id: Optional[str] = Header(None
 
 @app.get("/stepwise/export-excel/")
 async def export_excel(x_session_id: Optional[str] = Header(None)):
+    """Comprehensive Multi-Sheet Excel Export (S2 Audit Standard)."""
     await ensure_session(x_session_id)
+    if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
+
     session = sessions[x_session_id]
     output = io.BytesIO()
+
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        for name, data in session.get("checkpoints", {}).items():
-            if data: pd.DataFrame(data).to_excel(writer, sheet_name=name[:31], index=False)
-        session["df"].to_excel(writer, sheet_name="Hasil Akhir", index=False)
+        # 1. Export Stepwise Audit Trail (14+ Sheets)
+        if x_session_id in audit_checkpoints:
+            # Sort keys to ensure chronological order in Excel tabs
+            sorted_stages = sorted(audit_checkpoints[x_session_id].keys())
+            for stage_name in sorted_stages:
+                df_stage = audit_checkpoints[x_session_id][stage_name]
+                if df_stage is not None:
+                    # JSON SAFETY: clean for Excel
+                    df_safe = df_stage.replace([np.inf, -np.inf], np.nan).fillna("-")
+                    df_safe.to_excel(writer, sheet_name=stage_name[:31], index=False)
+
+        # 2. Export Final Result (Result + SPK Recommendations)
+        df_final = session["df"].copy()
+        # Ensure key SPK columns are present
+        if "metrics" in session and session["metrics"]:
+             # Add any specific summary metrics to a separate small table if needed
+             pass
+
+        # JSON SAFETY: clean for Excel
+        df_final_safe = df_final.replace([np.inf, -np.inf], np.nan).fillna("-")
+        df_final_safe.to_excel(writer, sheet_name="15_Hasil_Rekomendasi_SPK", index=False)
+
     output.seek(0)
-    return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f"attachment; filename=Riset_{x_session_id[:8]}.xlsx"})
+    timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M')
+    filename = f"Laporan_Audit_Riset_{timestamp}.xlsx"
+
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
 
 @app.get("/stepwise/build-manuscript/")
 async def build_manuscript(x_session_id: Optional[str] = Header(None)):
