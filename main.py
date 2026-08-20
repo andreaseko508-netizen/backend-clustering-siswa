@@ -1944,7 +1944,7 @@ async def spatial_map_projection(x_session_id: Optional[str] = Header(None)):
 
 @app.get("/stepwise/explain-siswa/")
 async def explain_student_clustering(x_session_id: Optional[str] = Header(None), nis: str = ""):
-    """Mathematical Transparency (Lightweight): Explains why a student was assigned to their cluster."""
+    """XAI Diagnostic (Hardened): Explains student cluster assignment with comparative evidence."""
     await ensure_session(x_session_id)
     if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
 
@@ -1961,7 +1961,7 @@ async def explain_student_clustering(x_session_id: Optional[str] = Header(None),
     features = config.get("features", list(df.select_dtypes(include=[np.number]).columns))
     ahp_weights = config.get("ahp_weights", {})
 
-    # 1. Prepare Data
+    # 1. Prepare Data (Current Student)
     X_student = student[features].select_dtypes(include=[np.number]).fillna(0).values[0]
     cluster_idx = int(student["cluster"].values[0])
 
@@ -1971,49 +1971,63 @@ async def explain_student_clustering(x_session_id: Optional[str] = Header(None),
 
     target_centroid = centroids[cluster_idx]
 
-    # 2. Centroid Affinity Analysis (Vercel-Safe Alternative to SHAP)
-    # This measures which features 'anchor' the student to this specific cluster centroid.
-    # We calculate the relative closeness of each feature to the target centroid.
-    contributions = []
+    # 2. Global Baseline (Mean of all students)
+    global_mean = df[features].mean(numeric_only=True).values
 
-    # Calculate feature ranges for normalization
+    # 3. Causal Insight Logic
+    # Find the feature where the student deviates most from the average (Normal)
+    # and matches the target profile (Centroid)
+    contributions = []
     X_all = df[features].select_dtypes(include=[np.number]).fillna(0).values
     ranges = np.ptp(X_all, axis=0) + 1e-10
 
     for i, f in enumerate(features):
         weight = ahp_weights.get(f, 1.0)
-        # Closeness = 1 - (diff / range)
-        diff = abs(X_student[i] - target_centroid[i])
-        closeness = 1.0 - (diff / ranges[i])
 
-        # Contribution score reflects weight and mathematical proximity
-        score = float(closeness * weight)
+        # Deviation from Global Mean
+        dev_from_mean = (X_student[i] - global_mean[i]) / ranges[i]
 
+        # Proximity to Target Centroid
+        proximity = 1.0 - (abs(X_student[i] - target_centroid[i]) / ranges[i])
+
+        score = float(proximity * weight)
         contributions.append({
             "feature": f,
             "val": score,
-            "abs_val": abs(score)
+            "abs_val": abs(score),
+            "student_val": float(X_student[i]),
+            "centroid_val": float(target_centroid[i]),
+            "global_avg": float(global_mean[i]),
+            "deviation": float(dev_from_mean)
         })
 
-    # Sort by contribution strength
+    # Sort to find the dominant driver
     contributions = sorted(contributions, key=lambda x: x["abs_val"], reverse=True)
+    top_driver = contributions[0]
+
+    # Construct Natural Language Explanation (XAI)
+    profile_name = session.get("metrics", {}).get("cluster_profiles", {}).get(str(cluster_idx), f"Klaster {cluster_idx + 1}")
+    if isinstance(profile_name, dict): # Check for nested profile info
+         profile_name = f"Klaster {cluster_idx + 1}"
+
+    # Semantic refinement
+    direction = "di bawah" if top_driver["deviation"] < 0 else "di atas"
+    gap_type = "kritis" if abs(top_driver["deviation"]) > 0.3 else "signifikan"
+
+    explanation = f"Siswa ini masuk {profile_name} terutama karena variabel '{top_driver['feature']}' "
+    explanation += f"berada {direction} rata-rata populasi secara {gap_type}. "
+    explanation += f"Profil ini memiliki kecocokan sebesar {top_driver['abs_val']*100:.1f}% dengan pusat massa kelompok."
 
     return {
         "status": "success",
         "nis": nis,
         "cluster": cluster_idx,
+        "profile_name": profile_name,
+        "explanation": explanation,
         "contributions": contributions,
-        "method": "Centroid Affinity Analysis (Lightweight)",
-        "explanation": f"Variabel '{contributions[0]['feature']}' memiliki kecocokan profil tertinggi yang menempatkan siswa ini di Klaster {cluster_idx + 1}."
-    }
-    contributions = sorted(contributions, key=lambda x: x["abs_val"], reverse=True)
-
-    return {
-        "status": "success",
-        "nis": nis,
-        "cluster": cluster_idx,
-        "contributions": contributions,
-        "explanation": f"Variabel '{contributions[0]['feature']}' memiliki pengaruh terbesar dalam menempatkan siswa ini di Klaster {cluster_idx + 1}."
+        "student_vector": X_student.tolist(),
+        "centroid_vector": target_centroid.tolist(),
+        "feature_names": features
     }
 
 @app.get("/stepwise/normality-test/")
