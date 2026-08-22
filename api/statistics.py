@@ -3,7 +3,7 @@ import pandas as pd
 import time
 from sklearn.metrics import davies_bouldin_score, silhouette_score, calinski_harabasz_score, silhouette_samples
 from sklearn.neighbors import NearestNeighbors
-from scipy.stats import chi2
+from scipy.stats import chi2, ttest_rel, wilcoxon
 
 def calculate_cluster_metrics(df, features, assignments, k, weights_dict=None):
     try:
@@ -154,3 +154,34 @@ def get_weighted_x(X, weights_dict, features):
     if not weights_dict: return X
     w = np.array([weights_dict.get(f, 1.0) for f in features])
     return X * np.sqrt(w)
+
+def perform_significance_test(X, labels_a, labels_b):
+    """
+    UJI SIGNIFIKANSI STATISTIK (Sinta 2 Requirement).
+    Membandingkan skor Silhouette individual dari dua algoritma
+    menggunakan Paired T-Test atau Wilcoxon Signed-Rank Test.
+    """
+    try:
+        # Calculate individual silhouette scores for each point under both algorithms
+        scores_a = silhouette_samples(X, labels_a)
+        scores_b = silhouette_samples(X, labels_b)
+
+        # Paired T-Test: Are the means significantly different?
+        t_stat, p_val = ttest_rel(scores_a, scores_b)
+
+        # Effect size (Cohen's d for paired samples)
+        diff = scores_a - scores_b
+        d = np.mean(diff) / (np.std(diff, ddof=1) + 1e-10)
+
+        is_significant = bool(p_val < 0.05)
+
+        return {
+            "p_value": float(np.nan_to_num(p_val)),
+            "t_statistic": float(np.nan_to_num(t_stat)),
+            "cohen_d": float(np.nan_to_num(d)),
+            "is_significant": is_significant,
+            "interpretation": "Perbedaan performa SIGNIFIKAN secara statistik (p < 0.05)." if is_significant else "Perbedaan performa TIDAK SIGNIFIKAN (Hanya kebetulan)."
+        }
+    except Exception as e:
+        print(f"Significance Test Error: {e}")
+        return {"p_value": 1.0, "is_significant": False, "interpretation": "Gagal menghitung signifikansi."}

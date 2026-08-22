@@ -18,7 +18,7 @@ from api.utils import (
 )
 from api.statistics import (
     calculate_cluster_metrics, calculate_xie_beni, calculate_partition_entropy,
-    calculate_hopkins, calculate_ahp_weights_and_cr, get_weighted_x
+    calculate_hopkins, calculate_ahp_weights_and_cr, get_weighted_x, perform_significance_test
 )
 from api.reports import (
     ResearchReportPDF, generate_radar_chart_bytes, generate_bar_chart_bytes,
@@ -302,6 +302,59 @@ async def stepwise_gap_statistic(x_session_id: Optional[str] = Header(None)):
     add_to_checklist(x_session_id, "Gap Statistic")
     return {"status": "success", "gap_values": gaps, "recommended_k": recommended_k}
 
+@app.get("/stepwise/compare_k/")
+async def stepwise_compare_k(x_session_id: Optional[str] = Header(None)):
+    """
+    S2 OPTIMIZATION: Multi-Metric Cluster Optimization (K=2 to K=10).
+    Calculates Silhouette and DBI for multiple K values to find the mathematical 'Sweet Spot'.
+    """
+    await ensure_session(x_session_id)
+    if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
+
+    df = sessions[x_session_id]["df"]
+    features = sessions[x_session_id]["config"].get("features", list(df.select_dtypes(include=[np.number]).columns))
+    X_raw = df[features].select_dtypes(include=[np.number]).fillna(0).values
+
+    # Use existing weights if available
+    ahp_weights = sessions[x_session_id]["config"].get("ahp_weights")
+    X = get_weighted_x(X_raw, ahp_weights, features)
+
+    if len(X) < 10:
+        return {"status": "error", "message": "Dataset terlalu kecil untuk optimasi K."}
+
+    results = []
+    for k in range(2, 11):
+        # Using KMeans++ as the standard optimization baseline
+        km = KMeans(n_clusters=k, init='k-means++', n_init=5, random_state=42).fit(X)
+        labels = km.labels_
+
+        sil = float(silhouette_score(X, labels))
+        dbi = float(davies_bouldin_score(X, labels))
+        chi = float(calinski_harabasz_score(X, labels))
+
+        results.append({
+            "k": k,
+            "silhouette": sil,
+            "dbi": dbi,
+            "chi": chi,
+            "wcss": float(km.inertia_)
+        })
+
+    # Heuristic for Best K (Max Silhouette and Min DBI)
+    best_k_sil = max(results, key=lambda x: x["silhouette"])["k"]
+    best_k_dbi = min(results, key=lambda x: x["dbi"])["k"]
+
+    add_to_checklist(x_session_id, "Optimasi Jumlah K")
+    sync_session_to_firebase(x_session_id)
+
+    return {
+        "status": "success",
+        "results": results,
+        "best_k_silhouette": best_k_sil,
+        "best_k_dbi": best_k_dbi,
+        "interpretation": f"Berdasarkan validasi internal, K={best_k_sil} memiliki kepadatan terbaik (Silhouette), sedangkan K={best_k_dbi} memiliki pemisahan terbaik (DBI)."
+    }
+
 # --- K-MEANS STEP-BY-STEP LOGIC ---
 
 @app.post("/stepwise/init-centroids/")
@@ -528,6 +581,66 @@ async def auto_converge(x_session_id: Optional[str] = Header(None)):
         audit_checkpoints[x_session_id]["15_Hasil_Rekomendasi_SPK"] = df.copy()
         return {"status": "success", "is_converged": True}
     return {"status": "error", "msg": "K-Means auto not yet modularized"}
+
+@app.post("/stepwise/compare-all/")
+@app.post("/stepwise/benchmark/")
+async def stepwise_benchmark(x_session_id: Optional[str] = Header(None)):
+    """
+    PUBLIKASI JURNAL: Head-to-Head Algorithm Comparison.
+    Membandingkan Weighted K-Means dan Fuzzy C-Means menggunakan metrik validitas
+    dan Uji Signifikansi Statistik (Paired T-Test).
+    """
+    await ensure_session(x_session_id)
+    if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
+
+    session = sessions[x_session_id]
+    df = session["df"]
+    config = session.get("config", {})
+    ahp_weights = config.get("ahp_weights")
+    k = config.get("k", 3)
+    features = config.get("features", list(df.select_dtypes(include=[np.number]).columns))
+    X_raw = df[features].select_dtypes(include=[np.number]).fillna(0).values
+    X = get_weighted_x(X_raw, ahp_weights, features)
+
+    # 1. Run K-Means++ Baseline
+    km = KMeans(n_clusters=k, init='k-means++', n_init=10, random_state=42).fit(X)
+    km_labels = km.labels_
+    km_metrics = calculate_cluster_metrics(df, features, km_labels, k, ahp_weights)
+
+    # 2. Run FCM (Vectorized Optimized)
+    m = config.get("m", 2.0)
+    U = np.random.dirichlet(np.ones(k), size=len(X)).T
+    for _ in range(100):
+        U_m = U ** m
+        centers = (U_m @ X) / (U_m.sum(axis=1)[:, np.newaxis] + 1e-10)
+        dists = np.fmax(np.linalg.norm(X[:, np.newaxis] - centers, axis=2), 1e-10)
+        new_U = (dists ** (-2.0 / (m - 1)) / (dists ** (-2.0 / (m - 1))).sum(axis=1)[:, np.newaxis]).T
+        if np.linalg.norm(new_U - U) < 1e-4: break
+        U = new_U
+    fcm_labels = np.argmax(U, axis=0)
+    fcm_metrics = calculate_cluster_metrics(df, features, fcm_labels, k, ahp_weights)
+
+    # 3. STATISTICAL SIGNIFICANCE TEST (Sinta 2 Standard)
+    sig_test = perform_significance_test(X, km_labels, fcm_labels)
+
+    comparison_data = {
+        "kmeans": km_metrics,
+        "fcm": fcm_metrics,
+        "significance": sig_test
+    }
+
+    best_algo = "kmeans" if km_metrics["silhouette_score"] > fcm_metrics["silhouette_score"] else "fcm"
+
+    return {
+        "status": "success",
+        "comparison_data": comparison_data,
+        "best_by_silhouette": best_algo,
+        "significance": sig_test,
+        "narrative": f"Analisis Komparatif: {sig_test['interpretation']} " +
+                     f"Weighted K-Means (Sil={km_metrics['silhouette_score']:.4f}) vs " +
+                     f"Fuzzy C-Means (Sil={fcm_metrics['silhouette_score']:.4f}).",
+        "message": f"Analisis komparatif selesai."
+    }
 
 @app.get("/stepwise/explain-siswa/")
 async def explain_siswa(x_session_id: Optional[str] = Header(None), nis: str = ""):

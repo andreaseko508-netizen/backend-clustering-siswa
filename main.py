@@ -302,6 +302,59 @@ async def stepwise_gap_statistic(x_session_id: Optional[str] = Header(None)):
     add_to_checklist(x_session_id, "Gap Statistic")
     return {"status": "success", "gap_values": gaps, "recommended_k": recommended_k}
 
+@app.get("/stepwise/compare_k/")
+async def stepwise_compare_k(x_session_id: Optional[str] = Header(None)):
+    """
+    S2 OPTIMIZATION: Multi-Metric Cluster Optimization (K=2 to K=10).
+    Calculates Silhouette and DBI for multiple K values to find the mathematical 'Sweet Spot'.
+    """
+    await ensure_session(x_session_id)
+    if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
+
+    df = sessions[x_session_id]["df"]
+    features = sessions[x_session_id]["config"].get("features", list(df.select_dtypes(include=[np.number]).columns))
+    X_raw = df[features].select_dtypes(include=[np.number]).fillna(0).values
+
+    # Use existing weights if available
+    ahp_weights = sessions[x_session_id]["config"].get("ahp_weights")
+    X = get_weighted_x(X_raw, ahp_weights, features)
+
+    if len(X) < 10:
+        return {"status": "error", "message": "Dataset terlalu kecil untuk optimasi K."}
+
+    results = []
+    for k in range(2, 11):
+        # Using KMeans++ as the standard optimization baseline
+        km = KMeans(n_clusters=k, init='k-means++', n_init=5, random_state=42).fit(X)
+        labels = km.labels_
+
+        sil = float(silhouette_score(X, labels))
+        dbi = float(davies_bouldin_score(X, labels))
+        chi = float(calinski_harabasz_score(X, labels))
+
+        results.append({
+            "k": k,
+            "silhouette": sil,
+            "dbi": dbi,
+            "chi": chi,
+            "wcss": float(km.inertia_)
+        })
+
+    # Heuristic for Best K (Max Silhouette and Min DBI)
+    best_k_sil = max(results, key=lambda x: x["silhouette"])["k"]
+    best_k_dbi = min(results, key=lambda x: x["dbi"])["k"]
+
+    add_to_checklist(x_session_id, "Optimasi Jumlah K")
+    sync_session_to_firebase(x_session_id)
+
+    return {
+        "status": "success",
+        "results": results,
+        "best_k_silhouette": best_k_sil,
+        "best_k_dbi": best_k_dbi,
+        "interpretation": f"Berdasarkan validasi internal, K={best_k_sil} memiliki kepadatan terbaik (Silhouette), sedangkan K={best_k_dbi} memiliki pemisahan terbaik (DBI)."
+    }
+
 # --- K-MEANS STEP-BY-STEP LOGIC ---
 
 @app.post("/stepwise/init-centroids/")
