@@ -18,7 +18,8 @@ from api.utils import (
 )
 from api.statistics import (
     calculate_cluster_metrics, calculate_xie_beni, calculate_partition_entropy,
-    calculate_hopkins, calculate_ahp_weights_and_cr, get_weighted_x, perform_significance_test
+    calculate_hopkins, calculate_ahp_weights_and_cr, get_weighted_x, perform_significance_test,
+    perform_stability_audit, perform_sensitivity_audit, perform_normality_test
 )
 from api.reports import (
     ResearchReportPDF, generate_radar_chart_bytes, generate_bar_chart_bytes,
@@ -642,6 +643,44 @@ async def stepwise_benchmark(x_session_id: Optional[str] = Header(None)):
         "message": f"Analisis komparatif selesai."
     }
 
+@app.post("/stepwise/mapping-config/")
+async def stepwise_mapping(x_session_id: Optional[str] = Header(None), config: Dict[str, Any] = Body(...)):
+    """Saves column mapping (Identity, Label, Features) to session."""
+    await ensure_session(x_session_id)
+    if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
+    sessions[x_session_id]["config"].update(config)
+    if x_session_id not in audit_checkpoints: audit_checkpoints[x_session_id] = {}
+    features = config.get("features", [])
+    if features:
+        audit_checkpoints[x_session_id]["02_Seleksi_Variabel"] = sessions[x_session_id]["df"][features].copy()
+    sync_session_to_firebase(x_session_id)
+    return {"status": "success"}
+
+@app.post("/stepwise/save_config/")
+async def stepwise_save_config(x_session_id: Optional[str] = Header(None), config: Dict[str, Any] = Body(...)):
+    """Saves algorithm configuration (K, m, etc) to session."""
+    await ensure_session(x_session_id)
+    if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
+    sessions[x_session_id]["config"].update(config)
+    if x_session_id not in audit_checkpoints: audit_checkpoints[x_session_id] = {}
+    audit_checkpoints[x_session_id]["09_Konfigurasi_Algoritma"] = pd.DataFrame(list(config.items()), columns=["Parameter", "Nilai"])
+    sync_session_to_firebase(x_session_id)
+    return {"status": "success"}
+
+@app.get("/stepwise/final-analysis/")
+async def get_final_analysis(x_session_id: Optional[str] = Header(None)):
+    await ensure_session(x_session_id)
+    if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
+    session = sessions[x_session_id]
+    metrics = session.get("metrics", {})
+    df_cleaned = session["df"].replace([np.inf, -np.inf], np.nan).fillna(0)
+    return {
+        "status": "success", "jumlah_data": len(session["df"]), "config": session.get("config", {}),
+        "metrics": metrics, "silhouette_score": metrics.get("silhouette_score", 0.0),
+        "davies_bouldin_index": metrics.get("davies_bouldin_index", 0.0),
+        "hasil_cluster": df_cleaned.to_dict(orient="records")
+    }
+
 @app.get("/stepwise/explain-siswa/")
 async def explain_siswa(x_session_id: Optional[str] = Header(None), nis: str = ""):
     await ensure_session(x_session_id)
@@ -663,6 +702,118 @@ async def explain_siswa(x_session_id: Optional[str] = Header(None), nis: str = "
     top = contributions[0]
     msg = f"Siswa ini masuk kelompok terutama karena '{top['feature']}' berada {'di bawah' if top['deviation'] < 0 else 'di atas'} rata-rata."
     return {"status": "success", "explanation": msg, "contributions": contributions, "student_vector": X_student.tolist(), "centroid_vector": target_centroid.tolist(), "feature_names": features}
+
+@app.post("/stepwise/save_config/")
+async def stepwise_save_config(x_session_id: Optional[str] = Header(None), config: Dict[str, Any] = Body(...)):
+    """Saves algorithm configuration (K, m, etc) to session."""
+    await ensure_session(x_session_id)
+    if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
+    sessions[x_session_id]["config"].update(config)
+    if x_session_id not in audit_checkpoints: audit_checkpoints[x_session_id] = {}
+    audit_checkpoints[x_session_id]["09_Konfigurasi_Algoritma"] = pd.DataFrame(list(config.items()), columns=["Parameter", "Nilai"])
+    sync_session_to_firebase(x_session_id)
+    return {"status": "success"}
+
+@app.post("/stepwise/mapping-config/")
+async def stepwise_mapping(x_session_id: Optional[str] = Header(None), config: Dict[str, Any] = Body(...)):
+    """Saves column mapping (Identity, Label, Features) to session."""
+    await ensure_session(x_session_id)
+    if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
+    sessions[x_session_id]["config"].update(config)
+    if x_session_id not in audit_checkpoints: audit_checkpoints[x_session_id] = {}
+    features = config.get("features", [])
+    if features:
+        audit_checkpoints[x_session_id]["02_Seleksi_Variabel"] = sessions[x_session_id]["df"][features].copy()
+    sync_session_to_firebase(x_session_id)
+    return {"status": "success"}
+
+@app.post("/stepwise/select-features/")
+async def stepwise_select_features(x_session_id: Optional[str] = Header(None), columns: List[str] = Body(...)):
+    """Updates the selected feature columns in the session configuration."""
+    await ensure_session(x_session_id)
+    if x_session_id not in sessions: raise HTTPException(status_code=404, detail="Session not found")
+    sessions[x_session_id]["config"]["features"] = columns
+    sync_session_to_firebase(x_session_id)
+    return {"status": "success"}
+
+@app.post("/stepwise/longitudinal-compare/")
+async def longitudinal_compare(params: Dict[str, Any] = Body(...)):
+    """Longitudinal Analysis: Compares student movements between two research periods."""
+    id_a, id_b = params.get("session_id_a"), params.get("session_id_b")
+    if not db: raise HTTPException(status_code=503, detail="Firestore required")
+    doc_a, doc_b = db.collection("python_sessions").document(id_a).get(), db.collection("python_sessions").document(id_b).get()
+    if not doc_a.exists or not doc_b.exists: raise HTTPException(status_code=404, detail="Sessions not found")
+    data_a, data_b = doc_a.to_dict(), doc_b.to_dict()
+    records_a, records_b = data_a.get("df_records", []), data_b.get("df_records", [])
+    if not records_a or not records_b: raise HTTPException(status_code=400, detail="Datasets empty")
+    df_a, df_b = pd.DataFrame(records_a), pd.DataFrame(records_b)
+    df_a['nis'], df_b['nis'] = df_a['nis'].astype(str).str.strip(), df_b['nis'].astype(str).str.strip()
+    merged = pd.merge(df_a[['nis', 'nama', 'cluster']], df_b[['nis', 'cluster']], on='nis', suffixes=('_a', '_b'))
+    if merged.empty: return {"status": "success", "message": "No overlap found", "movements": []}
+    movement_stats = []
+    upgraded, stable, downgraded = 0, 0, 0
+    for _, row in merged.iterrows():
+        c_a, c_b = int(row['cluster_a']), int(row['cluster_b'])
+        status = "STABLE"
+        if c_b < c_a: status, upgraded = "UPGRADED", upgraded + 1
+        elif c_b > c_a: status, downgraded = "DOWNGRADED", downgraded + 1
+        else: stable += 1
+        movement_stats.append({"nis": str(row['nis']), "nama": str(row['nama']), "from_cluster": c_a, "to_cluster": c_b, "status": status})
+    return {"status": "success", "summary": {"total_matched": len(merged), "upgraded": upgraded, "stable": stable, "downgraded": downgraded}, "movements": movement_stats}
+
+@app.post("/stepwise/simulate/")
+async def simulate_scenario(x_session_id: Optional[str] = Header(None), data: Dict[str, Any] = Body(...)):
+    """Individual Student Simulator (What-If Analysis)."""
+    await ensure_session(x_session_id)
+    session = sessions[x_session_id]
+    scaler, metrics = session.get("scaler"), session.get("metrics")
+    if not metrics or "centroids" not in metrics: raise HTTPException(400, "Run clustering first")
+    features, centroids = metrics.get("feature_names", []), np.array(metrics["centroids"])
+    X_input = np.array([[float(data.get(f, 0)) for f in features]])
+    X_scaled = scaler.transform(X_input) if scaler else X_input
+    dists = np.linalg.norm(centroids - X_scaled, axis=1)
+    new_cluster = int(np.argmin(dists))
+    return {"status": "success", "predicted_cluster": new_cluster, "distances": dists.tolist()}
+
+@app.post("/stepwise/simulate-policy/")
+async def simulate_policy_intervention(x_session_id: Optional[str] = Header(None), params: Dict[str, Any] = Body(...)):
+    """Population Policy Simulator (Intervention Analysis)."""
+    await ensure_session(x_session_id)
+    session = sessions[x_session_id]
+    df, metrics = session["df"], session.get("metrics")
+    target_cluster, interventions = params.get("target_cluster_idx"), params.get("interventions", {})
+    target_df = df[df["cluster"] == target_cluster].copy()
+    if target_df.empty: return {"status": "success", "migrated_count": 0}
+    features, centroids, ahp, scaler = metrics.get("feature_names", []), np.array(metrics["centroids"]), session.get("config", {}).get("ahp_weights"), session.get("scaler")
+    for feature, pct in interventions.items():
+        if feature in target_df.columns: target_df[feature] *= (1.0 + pct)
+    X_new_raw = target_df[features].fillna(0).values
+    X_new_scaled = scaler.transform(X_new_raw) if scaler else X_new_raw
+    X_new_clustering = get_weighted_x(X_new_scaled, ahp, features)
+    new_assignments = [int(np.argmin(np.linalg.norm(centroids - row, axis=1))) for row in X_new_clustering]
+    migrated_count = sum(1 for a in new_assignments if a != target_cluster)
+    return {"status": "success", "total_impacted": len(target_df), "migrated_count": migrated_count, "migration_rate": (migrated_count/len(target_df)*100)}
+
+@app.post("/stepwise/simulate-weights/")
+async def simulate_weight_sandbox(x_session_id: Optional[str] = Header(None), params: Dict[str, Any] = Body(...)):
+    """Weight Sandbox (Population Drift Analysis)."""
+    await ensure_session(x_session_id)
+    session = sessions[x_session_id]
+    df, metrics = session["df"], session.get("metrics")
+    new_weights, features, centroids, scaler = params.get("weights", {}), metrics.get("feature_names", []), np.array(metrics["centroids"]), session.get("scaler")
+    X_scaled = scaler.transform(df[features].fillna(0).values) if scaler else df[features].fillna(0).values
+    w = np.array([new_weights.get(f, 1.0) for f in features])
+    X_weighted, centroids_weighted = X_scaled * np.sqrt(w), centroids * np.sqrt(w)
+    new_assignments = [int(np.argmin(np.linalg.norm(centroids_weighted - row, axis=1))) for row in X_weighted]
+    new_counts = {str(i): int(np.sum(np.array(new_assignments) == i)) for i in range(len(centroids))}
+    return {"status": "success", "new_distribution": new_counts}
+
+@app.post("/algorithm/run")
+async def run_algo_wrapper(mode: str, x_session_id: Optional[str] = Header(None), params: Dict[str, Any] = Body(...)):
+    """Legacy Wrapper for dynamic algorithm execution."""
+    if mode == "simulate-weights": return await simulate_weight_sandbox(x_session_id, params)
+    if mode == "kmeans": return await run_kmeans_step(x_session_id, params)
+    raise HTTPException(400, "Mode not supported")
 
 @app.get("/stepwise/export-pdf/")
 async def export_pdf_route(x_session_id: Optional[str] = Header(None), lang: str = "id"):

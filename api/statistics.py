@@ -3,7 +3,8 @@ import pandas as pd
 import time
 from sklearn.metrics import davies_bouldin_score, silhouette_score, calinski_harabasz_score, silhouette_samples
 from sklearn.neighbors import NearestNeighbors
-from scipy.stats import chi2, ttest_rel, wilcoxon
+from scipy.stats import chi2, ttest_rel, wilcoxon, shapiro
+from sklearn.metrics import adjusted_rand_score
 
 def calculate_cluster_metrics(df, features, assignments, k, weights_dict=None):
     try:
@@ -185,3 +186,50 @@ def perform_significance_test(X, labels_a, labels_b):
     except Exception as e:
         print(f"Significance Test Error: {e}")
         return {"p_value": 1.0, "is_significant": False, "interpretation": "Gagal menghitung signifikansi."}
+
+def perform_stability_audit(X, k, full_labels, iterations=15):
+    """Scientific Stability Audit using Bootstrap sub-sampling and ARI."""
+    from sklearn.cluster import KMeans
+    ari_scores = []
+    for i in range(iterations):
+        sample_indices = np.random.choice(len(X), int(0.85 * len(X)), replace=False)
+        X_sub = X[sample_indices]
+        ref_labels_sub = full_labels[sample_indices]
+        km_sub = KMeans(n_clusters=k, init='k-means++', n_init=5, random_state=i).fit(X_sub)
+        ari = adjusted_rand_score(ref_labels_sub, km_sub.labels_)
+        ari_scores.append(float(ari))
+    avg_stability = float(np.mean(ari_scores))
+    level = "EXCELLENT" if avg_stability > 0.8 else ("STABLE" if avg_stability > 0.6 else "WEAK")
+    return {"stability_score": avg_stability, "level": level, "scores": ari_scores}
+
+def perform_sensitivity_audit(X_raw, features, ahp_weights, k, original_labels):
+    """Weight Sensitivity Audit: Tests stability when weights shift by +/- 10%."""
+    from sklearn.cluster import KMeans
+    results = []
+    for feature in features:
+        ari_scores = []
+        for shift in [1.1, 0.9]:
+            tweaked = ahp_weights.copy()
+            tweaked[feature] *= shift
+            total = sum(tweaked.values())
+            tweaked = {k: v/total for k, v in tweaked.items()}
+            X_tweaked = X_raw * np.sqrt(np.array([tweaked.get(f, 1.0) for f in features]))
+            km = KMeans(n_clusters=k, init='k-means++', n_init=5, random_state=42).fit(X_tweaked)
+            ari_scores.append(float(adjusted_rand_score(original_labels, km.labels_)))
+        avg_ari = np.mean(ari_scores)
+        results.append({"feature": feature, "stability_score": float(avg_ari), "level": "Robust" if avg_ari > 0.8 else "Sensitive"})
+    return {"overall_stability": float(np.mean([r["stability_score"] for r in results])), "results": results}
+
+def perform_normality_test(df, features):
+    """Methodological Audit: Performs Shapiro-Wilk Normality Test."""
+    results = []
+    non_normal = 0
+    for f in features:
+        data = df[f].fillna(0).values
+        if len(data) > 3:
+            stat, p = shapiro(data)
+            is_normal = p > 0.05
+            if not is_normal: non_normal += 1
+            results.append({"feature": f, "p_value": float(p), "is_normal": bool(is_normal)})
+    recommendation = "RobustScaler" if non_normal > (len(features)/2) else "StandardScaler"
+    return {"results": results, "recommendation": recommendation, "non_normal_count": non_normal}
