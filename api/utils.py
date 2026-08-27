@@ -55,8 +55,9 @@ def sync_session_to_firebase(session_id: str):
         # 2. Serialize DataFrame (The most critical part)
         if "df" in session and isinstance(session["df"], pd.DataFrame):
             df = session["df"]
-            session["df_columns"] = list(df.columns)
-            # Replace Inf/NaN with 0 for JSON safety
+            # S2 HARDENING: Always store column names explicitly
+            session["df_columns"] = [str(c) for c in df.columns]
+            # Replace Inf/NaN with 0 for JSON safety in Firestore
             df_safe = df.replace([np.inf, -np.inf], np.nan).fillna(0)
             session["df_records"] = df_safe.to_dict(orient="records")
             del session["df"]
@@ -98,8 +99,16 @@ async def ensure_session(x_session_id: str):
                     cols = data.get("df_columns")
                     df = pd.DataFrame(data["df_records"])
                     if cols:
-                        # Ensure columns order and existence
-                        df = df.reindex(columns=cols).fillna(0)
+                        # Ensure columns order and existence even if records were empty
+                        df = df.reindex(columns=cols)
+
+                    # S2 Hardening: Force numeric conversion for numeric columns
+                    for col in df.columns:
+                        try:
+                            # Try to convert to numeric, if fails, keep as is
+                            df[col] = pd.to_numeric(df[col], errors='ignore')
+                        except: pass
+
                     data["df"] = df
 
                 sessions[x_session_id] = data
