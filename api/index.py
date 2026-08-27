@@ -272,10 +272,24 @@ async def stepwise_compare_k(x_session_id: Optional[str] = Header(None)):
     results = []
     for k in range(2, 11):
         km = KMeans(n_clusters=k, n_init=5, random_state=42).fit(X)
-        results.append({"k": k, "silhouette": float(silhouette_score(X, km.labels_)), "dbi": float(davies_bouldin_score(X, km.labels_))})
+        results.append({
+            "k": k,
+            "silhouette": float(silhouette_score(X, km.labels_)),
+            "dbi": float(davies_bouldin_score(X, km.labels_))
+        })
+
+    best_k_sil = max(results, key=lambda x: x["silhouette"])["k"]
+    best_k_dbi = min(results, key=lambda x: x["dbi"])["k"]
+
     add_to_checklist(x_session_id, "Optimasi Jumlah K")
     sync_session_to_firebase(x_session_id)
-    return {"status": "success", "results": results, "best_k_dbi": min(results, key=lambda x: x["dbi"])["k"]}
+    return {
+        "status": "success",
+        "results": results,
+        "best_k_dbi": best_k_dbi,
+        "best_k_silhouette": best_k_sil,
+        "interpretation": f"Berdasarkan validasi metrik, K={best_k_sil} memiliki kepadatan terbaik (Silhouette), sedangkan K={best_k_dbi} memiliki pemisahan klaster terbaik (DBI)."
+    }
 
 # --- 6. K-MEANS LOGIC ---
 
