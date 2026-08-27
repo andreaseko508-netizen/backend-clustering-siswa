@@ -129,7 +129,7 @@ async def get_session_state(x_session_id: Optional[str] = Header(None)):
 
 # --- 2. PREPROCESSING ---
 
-# RESEARCH ORDINAL RULES (S2 Standard - Final Final)
+# RESEARCH ORDINAL RULES (S2 Standard - Custom Deployment)
 ORDINAL_RULES = {
     "prestasi": {
         "tidak pernah": 0, "tidak perna": 0, "tidak ada": 0, "tidak": 0, "none": 0, "nan": 0,
@@ -144,11 +144,12 @@ ORDINAL_RULES = {
         "jalan kaki": 0, "jalan": 0, "tidak ada": 0, "tidak punya": 0, "tidak": 0,
         "sepeda": 1,
         "motor": 2, "sepeda motor": 2,
-        "mobil": 3
+        "mobil": 3,
+        "angkutan umum": 4, "angkutan": 4, "umum": 4
     },
     "internet": {
-        "tidak ada": 0, "tidak punya": 0, "tidak": 0, "ridak": 0, "nan": 0,
-        "lemah": 1, "cukup": 2, "kuat": 3
+        "tidak": 0, "tidak ada": 0, "tidak punya": 0, "none": 0, "ridak": 0, "nan": 0,
+        "ya": 1, "ada": 1, "punya": 1
     }
 }
 
