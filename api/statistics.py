@@ -158,7 +158,7 @@ def get_weighted_x(X, weights_dict, features):
 
 def perform_significance_test(X, labels_a, labels_b):
     """
-    UJI SIGNIFIKANSI STATISTIK (Sinta 2 Requirement).
+    UJI SIGNIFIKANSI STATISTIK.
     Membandingkan skor Silhouette individual dari dua algoritma
     menggunakan Paired T-Test atau Wilcoxon Signed-Rank Test.
     """
