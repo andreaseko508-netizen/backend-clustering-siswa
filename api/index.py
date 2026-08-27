@@ -291,6 +291,27 @@ async def stepwise_compare_k(x_session_id: Optional[str] = Header(None)):
         "interpretation": f"Berdasarkan validasi metrik, K={best_k_sil} memiliki kepadatan terbaik (Silhouette), sedangkan K={best_k_dbi} memiliki pemisahan klaster terbaik (DBI)."
     }
 
+@app.post("/stepwise/gap-statistic/")
+async def stepwise_gap_statistic(x_session_id: Optional[str] = Header(None)):
+    """Step 15: Gap Statistic for K selection justification."""
+    session = await get_session(x_session_id)
+    X = session["df"].select_dtypes(include=[np.number]).fillna(0).values
+    if len(X) < 10: return {"status": "success", "recommended_k": 3, "gap_values": []}
+
+    n_samples, n_features = X.shape
+    ks = range(1, 7)
+    gaps = []
+    for k in ks:
+        km = KMeans(n_clusters=k, n_init=5, random_state=42).fit(X)
+        log_wcss = np.log(km.inertia_ + 1e-10)
+        ref_log_wcss = [np.log(KMeans(n_clusters=k, n_init=5, random_state=i).fit(np.random.uniform(X.min(axis=0), X.max(axis=0), size=(n_samples, n_features))).inertia_ + 1e-10) for i in range(5)]
+        gaps.append({"k": k, "gap": float(np.mean(ref_log_wcss) - log_wcss)})
+
+    recommended_k = int(ks[np.argmax([g["gap"] for g in gaps])])
+    add_to_checklist(x_session_id, "Gap Statistic")
+    sync_session_to_firebase(x_session_id)
+    return {"status": "success", "gap_values": gaps, "recommended_k": recommended_k}
+
 # --- 6. K-MEANS LOGIC ---
 
 @app.post("/stepwise/init-centroids/")
@@ -465,6 +486,16 @@ async def auto_converge(x_session_id: Optional[str] = Header(None)):
         return {"status": "success", "is_converged": True, "iteration": 10, "centroids": km.cluster_centers_.tolist(), "evaluation": eval_k, "history": history}
 
 # --- 8. BENCHMARK & ANALYSIS ---
+
+@app.get("/stepwise/wcss-detail/")
+async def get_wcss_detail(x_session_id: Optional[str] = Header(None)):
+    session = await get_session(x_session_id)
+    return {"status": "success", "wcss": session.get("metrics", {}).get("wcss", 0.0)}
+
+@app.get("/stepwise/dbi-detail/")
+async def get_dbi_detail(x_session_id: Optional[str] = Header(None)):
+    session = await get_session(x_session_id)
+    return {"status": "success", "dbi": session.get("metrics", {}).get("dbi", 0.0)}
 
 @app.post("/stepwise/benchmark/")
 @app.post("/stepwise/compare-all/")
