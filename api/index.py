@@ -129,28 +129,32 @@ async def get_session_state(x_session_id: Optional[str] = Header(None)):
 
 # --- 2. PREPROCESSING ---
 
-# RESEARCH ORDINAL RULES (S2 Standard)
+# RESEARCH ORDINAL RULES (S2 Standard - Final Final)
 ORDINAL_RULES = {
     "prestasi": {
-        "tidak pernah": 0, "tidak ada": 0, "none": 0, "nan": 0,
-        "tingkat sekolah": 1,
-        "tingkat kecamatan": 2,
-        "tingkat kabupaten": 3, "tingkat kabupaten/kota": 3, "tingkat kota": 3,
-        "tingkat provinsi": 4,
-        "tingkat nasional": 5,
-        "tingkat internasional": 6
+        "tidak pernah": 0, "tidak perna": 0, "tidak ada": 0, "tidak": 0, "none": 0, "nan": 0,
+        "tingkat sekolah": 1, "sekolah": 1,
+        "tingkat kecamatan": 2, "kecamatan": 2,
+        "tingkat kabupaten": 3, "tingkat kabupaten/kota": 3, "tingkat kabupaten kota": 3, "kabupaten": 3,
+        "tingkat provinsi": 4, "provinsi": 4,
+        "tingkat nasional": 5, "nasional": 5,
+        "tingkat internasional": 6, "internasional": 6
     },
     "kendaraan": {
-        "jalan kaki": 0, "tidak ada": 0, "sepeda": 1, "motor": 2, "mobil": 3
+        "jalan kaki": 0, "jalan": 0, "tidak ada": 0, "tidak punya": 0, "tidak": 0,
+        "sepeda": 1,
+        "motor": 2, "sepeda motor": 2,
+        "mobil": 3
     },
     "internet": {
-        "tidak ada": 0, "tidak punya": 0, "lemah": 1, "cukup": 2, "kuat": 3
+        "tidak ada": 0, "tidak punya": 0, "tidak": 0, "ridak": 0, "nan": 0,
+        "lemah": 1, "cukup": 2, "kuat": 3
     }
 }
 
 @app.post("/stepwise/conversion/")
 async def stepwise_conversion(x_session_id: Optional[str] = Header(None)):
-    """Step 3: Precise Categorical Transformation with Case-Insensitive Normalization."""
+    """Step 3: Categorical to Numeric with Robust Ordinal Mapping."""
     session = await get_session(x_session_id)
     df, config = session["df"], session["config"]
     mapping_report = {}
@@ -159,24 +163,24 @@ async def stepwise_conversion(x_session_id: Optional[str] = Header(None)):
     cat_cols = df[feats].select_dtypes(include=['object']).columns
 
     for col in cat_cols:
-        # 1. Normalization BEFORE mapping
+        # 1. NORMALIZATION: Lowercase and strip
         raw_values = df[col].astype(str).str.strip().str.lower()
 
         col_lower = col.lower()
         rule_key = next((k for k in ORDINAL_RULES if k in col_lower), None)
 
         if rule_key:
-            # APPLY SCIENTIFIC ORDINAL RULES
             rule = ORDINAL_RULES[rule_key]
+            # Map values, default unknown to 0 (lowest rank)
             df[col] = raw_values.map(rule).fillna(0).astype(int)
-            # Create a clean report showing unique mappings used
+            # REPORT: Create Label -> Code mapping for UI
             unique_found = raw_values.unique()
-            mapping_report[col] = {str(rule.get(v, 0)): v.title() for v in unique_found}
+            mapping_report[col] = {v.title(): str(rule.get(v, 0)) for v in unique_found}
         else:
-            # FALLBACK: Normal Label Encoding for generic categories
+            # FALLBACK: Label Encoding for generic categories
             codes, uniques = pd.factorize(raw_values)
             df[col] = codes
-            mapping_report[col] = {str(i): str(val).title() for i, val in enumerate(uniques)}
+            mapping_report[col] = {str(val).title(): str(i) for i, val in enumerate(uniques)}
 
     session["df"] = df
     ensure_audit(x_session_id)
