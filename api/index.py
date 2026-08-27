@@ -458,32 +458,68 @@ async def fcm_iteration_step(x_session_id: Optional[str] = Header(None)):
 
 @app.post("/stepwise/auto-converge/")
 async def auto_converge(x_session_id: Optional[str] = Header(None)):
+    """Step 20: Full Algorithm Automation with Convergence Trail (Riset Standard)."""
     session = await get_session(x_session_id)
     state = session["algo_state"]
+    k, feats = state["k"], state["features"]
+    ahp = session["config"].get("ahp_weights")
+    X = get_weighted_x(session["df"][feats].fillna(0).values, ahp, feats)
+
+    history = []
+
+    # --- 1. FCM AUTO CONVERGE ---
     if state.get("mode") == "fcm":
-        X, U, m, k = np.array(state["X"]), np.array(state["U"]), state["m"], state["k"]
-        for _ in range(100):
+        U, m = np.array(state["U"]), state["m"]
+        for i in range(1, 101):
             U_m = U ** m
             centers = (U_m @ X) / (U_m.sum(axis=1)[:, np.newaxis] + 1e-10)
             dists = np.fmax(np.linalg.norm(X[:, np.newaxis] - centers, axis=2), 1e-10)
             new_U = ( (dists ** (-2.0 / (m - 1))) / (dists ** (-2.0 / (m - 1))).sum(axis=1)[:, np.newaxis] ).T
-            if np.linalg.norm(new_U - U) < 1e-4: break
+            diff = float(np.linalg.norm(new_U - U))
+
+            # WCSS equivalent for FCM (J_m)
+            jm = float(np.sum((U_m).T * (dists**2)))
+
+            history.append({"iter": i, "movement": diff, "wcss": jm})
             U = new_U
-        eval_f = calculate_cluster_metrics(session["df"], state["features"], np.argmax(U, axis=0), k, session["config"].get("ahp_weights"))
-        session.update({"metrics": eval_f, "all_results": {"fcm": eval_f}, "algo_state": {**state, "U": U.tolist(), "centroids": centers.tolist(), "is_converged": True}})
+            if diff < 1e-4: break
+
+        eval_f = calculate_cluster_metrics(session["df"], feats, np.argmax(U, axis=0), k, ahp)
+        session.update({
+            "metrics": eval_f,
+            "all_results": {"fcm": eval_f},
+            "algo_state": {**state, "U": U.tolist(), "centroids": centers.tolist(), "is_converged": True, "history": history}
+        })
+        add_to_checklist(x_session_id, "Riset Selesai (Auto FCM)")
         sync_session_to_firebase(x_session_id)
-        return {"status": "success", "is_converged": True, "evaluation": eval_f, "centroids": centers.tolist(), "iteration": 100}
+        return {"status": "success", "is_converged": True, "evaluation": eval_f, "centroids": centers.tolist(), "iteration": len(history), "history": history}
+
+    # --- 2. K-MEANS AUTO CONVERGE ---
     else:
-        k, feats = state["k"], state["features"]
-        ahp = session["config"].get("ahp_weights")
-        X = get_weighted_x(session["df"][feats].fillna(0).values, ahp, feats)
-        km = KMeans(n_clusters=k, init='k-means++', n_init=10, random_state=42).fit(X)
-        eval_k = calculate_cluster_metrics(session["df"], feats, km.labels_, k, ahp)
-        history = [{"iter": 1, "movement": 0.0, "wcss": float(km.inertia_)}]
-        session.update({"metrics": eval_k, "all_results": {"kmeans": eval_k}, "algo_state": {**state, "centroids": km.cluster_centers_.tolist(), "assignments": km.labels_.tolist(), "is_converged": True, "history": history}})
-        add_to_checklist(x_session_id, "Riset Selesai (Auto)")
+        centroids = np.array(state["centroids"])
+        for i in range(1, 101):
+            # Assignment
+            dists = np.linalg.norm(X[:, np.newaxis] - centroids, axis=2)
+            assignments = np.argmin(dists, axis=1)
+            wcss = float(np.sum(np.min(dists, axis=1)**2))
+
+            # Update
+            new_centroids = np.array([X[assignments == j].mean(axis=0) if len(X[assignments == j]) > 0 else centroids[j] for j in range(k)])
+            movement = float(np.linalg.norm(new_centroids - centroids))
+
+            history.append({"iter": i, "movement": movement, "wcss": wcss})
+            centroids = new_centroids
+            if movement < 1e-4: break
+
+        eval_k = calculate_cluster_metrics(session["df"], feats, assignments, k, ahp)
+        session.update({
+            "metrics": eval_k,
+            "all_results": {"kmeans": eval_k},
+            "algo_state": {**state, "centroids": centroids.tolist(), "assignments": assignments.tolist(), "is_converged": True, "history": history}
+        })
+        add_to_checklist(x_session_id, "Riset Selesai (Auto K-Means)")
         sync_session_to_firebase(x_session_id)
-        return {"status": "success", "is_converged": True, "iteration": 10, "centroids": km.cluster_centers_.tolist(), "evaluation": eval_k, "history": history}
+        return {"status": "success", "is_converged": True, "iteration": len(history), "centroids": centroids.tolist(), "evaluation": eval_k, "history": history}
 
 # --- 8. BENCHMARK & ANALYSIS ---
 
