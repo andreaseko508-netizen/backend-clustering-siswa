@@ -18,22 +18,13 @@ from sklearn.metrics import silhouette_score, davies_bouldin_score, calinski_har
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("SIMORBATAS")
 
+# --- DYNAMIC PATH ADJUSTMENT ---
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.append(current_dir)
+
 # --- LOCAL MODULES ---
 try:
-    from api.utils import (
-        sessions, audit_checkpoints, db, ensure_session,
-        sync_session_to_firebase, add_to_checklist, get_representative_data
-    )
-    from api.statistics import (
-        calculate_cluster_metrics, calculate_xie_beni, calculate_partition_entropy,
-        calculate_hopkins, calculate_ahp_weights_and_cr, get_weighted_x, perform_significance_test,
-        perform_stability_audit, perform_sensitivity_audit, perform_normality_test
-    )
-    from api.reports import (
-        ResearchReportPDF, generate_radar_chart_bytes, generate_bar_chart_bytes,
-        generate_silhouette_chart_bytes, generate_manuscript_docx
-    )
-except ImportError:
     from utils import (
         sessions, audit_checkpoints, db, ensure_session,
         sync_session_to_firebase, add_to_checklist, get_representative_data
@@ -47,8 +38,12 @@ except ImportError:
         ResearchReportPDF, generate_radar_chart_bytes, generate_bar_chart_bytes,
         generate_silhouette_chart_bytes, generate_manuscript_docx
     )
+except ImportError:
+    from api.utils import sessions, audit_checkpoints, db, ensure_session, sync_session_to_firebase, add_to_checklist, get_representative_data
+    from api.statistics import calculate_cluster_metrics, calculate_xie_beni, calculate_partition_entropy, calculate_hopkins, calculate_ahp_weights_and_cr, get_weighted_x, perform_significance_test, perform_stability_audit, perform_sensitivity_audit, perform_normality_test
+    from api.reports import ResearchReportPDF, generate_radar_chart_bytes, generate_bar_chart_bytes, generate_silhouette_chart_bytes, generate_manuscript_docx
 
-app = FastAPI(title="SIMORBATAS Research Engine", version="18.0.0")
+app = FastAPI(title="SIMORBATAS Unified Engine", version="18.0.0")
 
 # --- HELPERS ---
 def safe_float(val):
@@ -93,7 +88,7 @@ async def root():
 async def health():
     return {"status": "UP"}
 
-# --- 1. DATASET MANAGEMENT ---
+# --- 1. DATASET & CONFIG ---
 
 @app.post("/stepwise/upload/")
 async def stepwise_upload(file: UploadFile = File(...), x_session_id: Optional[str] = Header(None)):
@@ -181,6 +176,13 @@ async def stepwise_missing(x_session_id: Optional[str] = Header(None)):
     add_to_checklist(x_session_id, "Imputasi Data"); sync_session_to_firebase(x_session_id)
     return {"status": "success"}
 
+@app.get("/stepwise/missing-scan")
+async def missing_scan(x_session_id: Optional[str] = Header(None)):
+    session = await get_session(x_session_id); df = session["df"]
+    num_cols = df.select_dtypes(include=['number']).columns
+    stats = {col: {"count": int(df[col].isnull().sum()), "median": float(df[col].median())} for col in num_cols if df[col].isnull().sum() > 0}
+    return {"status": "success", "missing_by_column": stats}
+
 @app.post("/stepwise/outlier-detection/")
 async def stepwise_outlier(x_session_id: Optional[str] = Header(None)):
     session = await get_session(x_session_id); num_df = session["df"][session["config"].get("features", list(session["df"].columns))].select_dtypes(include=['number'])
@@ -190,7 +192,7 @@ async def stepwise_outlier(x_session_id: Optional[str] = Header(None)):
     add_to_checklist(x_session_id, "Audit Outlier"); sync_session_to_firebase(x_session_id)
     return {"status": "success", "outlier_count": int(mask.sum())}
 
-# --- 3. QUALITY & AUDIT ---
+# --- 3. QUALITY & STATS (CRITICAL STEP 5 & 6) ---
 
 @app.get("/stepwise/quality-report/")
 async def get_quality_report(x_session_id: Optional[str] = Header(None)):
@@ -198,6 +200,22 @@ async def get_quality_report(x_session_id: Optional[str] = Header(None)):
     hopkins = calculate_hopkins(df[num_cols].fillna(0).values) if len(num_cols) >= 2 else 0.5
     completeness = 1.0 - (df.isnull().sum().sum() / df.size if df.size > 0 else 0)
     return {"status": "success", "rows": len(df), "cols": len(df.columns), "numeric_features": len(num_cols), "completeness": safe_float(completeness), "hopkins_statistic": safe_float(hopkins), "is_suitable": len(df) > 0 and len(num_cols) >= 2, "execution_checklist": session["audit"].get("execution_checklist", [])}
+
+@app.get("/stepwise/checkpoints/")
+async def get_checkpoints(x_session_id: Optional[str] = Header(None)):
+    session = await get_session(x_session_id)
+    return {"status": "success", "checkpoints": session.get("checkpoints", {})}
+
+@app.get("/stepwise/normalization-stats/")
+async def get_norm_stats(x_session_id: Optional[str] = Header(None)):
+    session = await get_session(x_session_id); num_df = session["df"].select_dtypes(include=['number'])
+    stats = {col: {"min": safe_float(num_df[col].min()), "max": safe_float(num_df[col].max()), "mean": safe_float(num_df[col].mean()), "median": safe_float(num_df[col].median()), "std": safe_float(num_df[col].std()), "variance": safe_float(num_df[col].var())} for col in num_df.columns if not num_df[col].isnull().all()}
+    return {"status": "success", "stats": stats}
+
+@app.get("/stepwise/normality-test/")
+async def stepwise_normality_test(x_session_id: Optional[str] = Header(None)):
+    session = await get_session(x_session_id); res = perform_normality_test(session["df"], session["config"].get("features", list(session["df"].columns)))
+    res["status"] = "success"; return res
 
 @app.get("/stepwise/correlation-matrix/")
 async def get_correlation_analysis(x_session_id: Optional[str] = Header(None)):
@@ -259,7 +277,7 @@ async def auto_converge(x_session_id: Optional[str] = Header(None)):
 @app.get("/stepwise/final-analysis/")
 async def get_final_analysis(x_session_id: Optional[str] = Header(None)):
     session = await get_session(x_session_id); m = session.get("metrics", {})
-    return {"status": "success", "jumlah_data": len(session["df"]), "config": session.get("config", {}), "metrics": m, "wcss": m.get("wcss", 0.0), "silhouette_score": m.get("silhouette_score", 0.0), "davies_bouldin_index": m.get("davies_bouldin_index", 0.0), "calinski_harabasz_index": m.get("calinski_harabasz_index", 0.0), "iterations": session.get("algo_state", {}).get("iteration", 0), "runtime_sec": 0.005, "cluster_distribution": m.get("distribution", {}), "cluster_profiles": m.get("cluster_profiles", {}), "hasil_cluster": session["df"].fillna(0).to_dict(orient="records")}
+    return {"status": "success", "jumlah_data": len(session["df"]), "centroids": session.get("algo_state", {}).get("centroids", []), "config": session.get("config", {}), "metrics": m, "wcss": m.get("wcss", 0.0), "silhouette_score": m.get("silhouette_score", 0.0), "davies_bouldin_index": m.get("davies_bouldin_index", 0.0), "calinski_harabasz_index": m.get("calinski_harabasz_index", 0.0), "iterations": session.get("algo_state", {}).get("iteration", 0), "runtime_sec": 0.005, "cluster_distribution": m.get("distribution", {}), "cluster_profiles": m.get("cluster_profiles", {}), "hasil_cluster": session["df"].fillna(0).to_dict(orient="records")}
 
 @app.get("/stepwise/export-excel/")
 async def export_excel_route(x_session_id: Optional[str] = Header(None)):
@@ -269,11 +287,6 @@ async def export_excel_route(x_session_id: Optional[str] = Header(None)):
         ensure_audit(x_session_id)
         for name, df in audit_checkpoints.get(x_session_id, {}).items(): df.to_excel(writer, sheet_name=name[:31], index=False)
     output.seek(0); return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f"attachment; filename=Riset_SIMORBATAS.xlsx"})
-
-@app.get("/stepwise/export-pdf/")
-async def export_pdf_route(x_session_id: Optional[str] = Header(None)):
-    session = await get_session(x_session_id); pdf = ResearchReportPDF(); pdf.add_page(); pdf.chapter_title("LAPORAN RISET")
-    return StreamingResponse(io.BytesIO(pdf.output()), media_type="application/pdf")
 
 if __name__ == "__main__":
     import uvicorn; uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 7860)))
