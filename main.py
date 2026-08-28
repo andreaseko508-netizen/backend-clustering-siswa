@@ -48,7 +48,7 @@ except ImportError:
         generate_silhouette_chart_bytes, generate_manuscript_docx
     )
 
-app = FastAPI(title="SIMORBATAS Unified Engine", version="17.0.0")
+app = FastAPI(title="SIMORBATAS Research Engine", version="18.0.0")
 
 # --- HELPERS ---
 def safe_float(val):
@@ -58,29 +58,17 @@ def safe_float(val):
     except: return 0.0
 
 def reorder_clusters(df, features, assignments, k):
-    """
-    S2 SCIENTIFIC STANDARDIZATION: Reorders clusters based on aggregate quality.
-    Cluster 0 (C1) will always be the one with the HIGHEST aggregate feature values.
-    Cluster K-1 will always be the one with the LOWEST aggregate feature values.
-    """
     try:
         scores = []
         for i in range(k):
-            # Calculate aggregate mean of all features for this cluster
             cluster_data = df[assignments == i][features]
             if not cluster_data.empty:
                 score = cluster_data.mean().sum()
                 scores.append((i, score))
             else:
                 scores.append((i, -1e10))
-
-        # Sort descending (Highest score first)
         scores.sort(key=lambda x: x[1], reverse=True)
-
-        # Mapping: {old_id: new_rank_id}
         remap = {old_id: new_id for new_id, (old_id, _) in enumerate(scores)}
-
-        # Create new labels
         new_labels = np.array([remap[x] for x in assignments])
         return new_labels, remap
     except Exception as e:
@@ -101,7 +89,11 @@ def ensure_audit(x_session_id: str):
 async def root():
     return {"status": "Online", "engine": "SIMORBATAS-Vercel", "firebase": "Connected" if db else "Offline"}
 
-# --- 1. DATASET & CONFIG ---
+@app.get("/health")
+async def health():
+    return {"status": "UP"}
+
+# --- 1. DATASET MANAGEMENT ---
 
 @app.post("/stepwise/upload/")
 async def stepwise_upload(file: UploadFile = File(...), x_session_id: Optional[str] = Header(None)):
@@ -141,6 +133,11 @@ async def stepwise_save_config(x_session_id: Optional[str] = Header(None), confi
     ensure_audit(x_session_id); audit_checkpoints[x_session_id]["09_Konfigurasi_Algoritma"] = pd.DataFrame(list(config.items()))
     add_to_checklist(x_session_id, "Konfigurasi Algoritma"); sync_session_to_firebase(x_session_id)
     return {"status": "success"}
+
+@app.get("/stepwise/session-state/")
+async def get_session_state(x_session_id: Optional[str] = Header(None)):
+    await ensure_session(x_session_id)
+    return {"state": "UPLOADED" if x_session_id in sessions else "IDLE"}
 
 # --- 2. PREPROCESSING ---
 
@@ -184,7 +181,23 @@ async def stepwise_missing(x_session_id: Optional[str] = Header(None)):
     add_to_checklist(x_session_id, "Imputasi Data"); sync_session_to_firebase(x_session_id)
     return {"status": "success"}
 
-# --- 3. AUDIT & STATS ---
+@app.post("/stepwise/outlier-detection/")
+async def stepwise_outlier(x_session_id: Optional[str] = Header(None)):
+    session = await get_session(x_session_id); num_df = session["df"][session["config"].get("features", list(session["df"].columns))].select_dtypes(include=['number'])
+    if len(num_df) < 5: return {"status": "success", "outlier_count": 0}
+    mask = (np.abs((num_df - num_df.mean()) / (num_df.std() + 1e-10)) > 3).any(axis=1)
+    ensure_audit(x_session_id); audit_checkpoints[x_session_id]["06_Audit_Outlier"] = session["df"][~mask].copy()
+    add_to_checklist(x_session_id, "Audit Outlier"); sync_session_to_firebase(x_session_id)
+    return {"status": "success", "outlier_count": int(mask.sum())}
+
+# --- 3. QUALITY & AUDIT ---
+
+@app.get("/stepwise/quality-report/")
+async def get_quality_report(x_session_id: Optional[str] = Header(None)):
+    session = await get_session(x_session_id); df = session["df"]; num_cols = list(df.select_dtypes(include=['number']).columns)
+    hopkins = calculate_hopkins(df[num_cols].fillna(0).values) if len(num_cols) >= 2 else 0.5
+    completeness = 1.0 - (df.isnull().sum().sum() / df.size if df.size > 0 else 0)
+    return {"status": "success", "rows": len(df), "cols": len(df.columns), "numeric_features": len(num_cols), "completeness": safe_float(completeness), "hopkins_statistic": safe_float(hopkins), "is_suitable": len(df) > 0 and len(num_cols) >= 2, "execution_checklist": session["audit"].get("execution_checklist", [])}
 
 @app.get("/stepwise/correlation-matrix/")
 async def get_correlation_analysis(x_session_id: Optional[str] = Header(None)):
@@ -231,29 +244,22 @@ async def auto_converge(x_session_id: Optional[str] = Header(None)):
         wcss = safe_float(np.sum(np.min(dists, axis=1)**2)); new_c = np.array([X[assignments == j].mean(axis=0) if len(X[assignments == j]) > 0 else centroids[j] for j in range(k)])
         move = safe_float(np.linalg.norm(new_c - centroids)); history.append({"iter": i, "movement": move, "wcss": wcss}); centroids = new_c
         if move < 1e-4: break
-
-    # S2 STANDARDIZATION: Logic Reordering by Rank
-    # Ensure Cluster 0 (Label '1') is always the best (Highest Aggregate Profile)
-    # This prevents the confusion between text explanation vs app labels.
     new_labels, remap = reorder_clusters(session["df"], feats, assignments, k)
     final_centroids = [centroids[old_id].tolist() for old_id, _ in sorted(remap.items(), key=lambda x: x[1])]
-
     session["df"]["cluster"] = new_labels.tolist()
-    for j in range(k):
-        # We need to re-calculate distances in the new ordered space
-        session["df"][f"dist_c{j}"] = np.linalg.norm(X - np.array(final_centroids[j]), axis=1)
-
+    for j in range(k): session["df"][f"dist_c{j}"] = np.linalg.norm(X - np.array(final_centroids[j]), axis=1)
     eval_k = calculate_cluster_metrics(session["df"], feats, new_labels, k, ahp)
     session.update({"metrics": eval_k, "all_results": {"kmeans": eval_k}, "algo_state": {**state, "centroids": final_centroids, "assignments": new_labels.tolist(), "is_converged": True, "history": history, "iteration": len(history)}})
     add_to_checklist(x_session_id, "Riset Selesai (Auto)"); sync_session_to_firebase(x_session_id)
-    return {"status": "success", "is_converged": True, "iterations": len(history), "history": history, "centroids": final_centroids, "evaluation": eval_k, "jumlah_data": len(session["df"]), "cluster_distribution": eval_k["distribution"], "hasil_cluster": session["df"].fillna(0).to_dict(orient="records"), "config": session["config"]}
+    resp = {"status": "success", "is_converged": True, "iterations": len(history), "history": history, "centroids": final_centroids, "evaluation": eval_k, "jumlah_data": len(session["df"]), "cluster_distribution": eval_k["distribution"], "hasil_cluster": session["df"].fillna(0).to_dict(orient="records"), "config": session["config"]}
+    return resp
 
-# --- 5. ANALYTICS & EXPORTS ---
+# --- 5. FINAL ANALYSIS ---
 
 @app.get("/stepwise/final-analysis/")
 async def get_final_analysis(x_session_id: Optional[str] = Header(None)):
     session = await get_session(x_session_id); m = session.get("metrics", {})
-    return {"status": "success", "jumlah_data": len(session["df"]), "centroids": session.get("algo_state", {}).get("centroids", []), "config": session.get("config", {}), "metrics": m, "wcss": m.get("wcss", 0.0), "silhouette_score": m.get("silhouette_score", 0.0), "davies_bouldin_index": m.get("davies_bouldin_index", 0.0), "calinski_harabasz_index": m.get("calinski_harabasz_index", 0.0), "iterations": session.get("algo_state", {}).get("iteration", 0), "runtime_sec": 0.005, "cluster_distribution": m.get("distribution", {}), "cluster_profiles": m.get("cluster_profiles", {}), "hasil_cluster": session["df"].fillna(0).to_dict(orient="records")}
+    return {"status": "success", "jumlah_data": len(session["df"]), "config": session.get("config", {}), "metrics": m, "wcss": m.get("wcss", 0.0), "silhouette_score": m.get("silhouette_score", 0.0), "davies_bouldin_index": m.get("davies_bouldin_index", 0.0), "calinski_harabasz_index": m.get("calinski_harabasz_index", 0.0), "iterations": session.get("algo_state", {}).get("iteration", 0), "runtime_sec": 0.005, "cluster_distribution": m.get("distribution", {}), "cluster_profiles": m.get("cluster_profiles", {}), "hasil_cluster": session["df"].fillna(0).to_dict(orient="records")}
 
 @app.get("/stepwise/export-excel/")
 async def export_excel_route(x_session_id: Optional[str] = Header(None)):
@@ -263,6 +269,11 @@ async def export_excel_route(x_session_id: Optional[str] = Header(None)):
         ensure_audit(x_session_id)
         for name, df in audit_checkpoints.get(x_session_id, {}).items(): df.to_excel(writer, sheet_name=name[:31], index=False)
     output.seek(0); return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f"attachment; filename=Riset_SIMORBATAS.xlsx"})
+
+@app.get("/stepwise/export-pdf/")
+async def export_pdf_route(x_session_id: Optional[str] = Header(None)):
+    session = await get_session(x_session_id); pdf = ResearchReportPDF(); pdf.add_page(); pdf.chapter_title("LAPORAN RISET")
+    return StreamingResponse(io.BytesIO(pdf.output()), media_type="application/pdf")
 
 if __name__ == "__main__":
     import uvicorn; uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 7860)))
