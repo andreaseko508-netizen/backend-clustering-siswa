@@ -48,7 +48,7 @@ except ImportError:
         generate_silhouette_chart_bytes, generate_manuscript_docx
     )
 
-app = FastAPI(title="SIMORBATAS Global AI Runtime", version="12.0.0")
+app = FastAPI(title="SIMORBATAS Complete AI Runtime", version="13.0.0")
 
 # --- HELPERS ---
 def safe_float(val):
@@ -70,6 +70,10 @@ def ensure_audit(x_session_id: str):
 @app.get("/")
 async def root():
     return {"status": "Online", "engine": "SIMORBATAS-Vercel", "firebase": "Connected" if db else "Offline"}
+
+@app.get("/health")
+async def health():
+    return {"status": "UP"}
 
 # --- 1. DATASET & CONFIG ---
 
@@ -112,6 +116,11 @@ async def stepwise_save_config(x_session_id: Optional[str] = Header(None), confi
     add_to_checklist(x_session_id, "Konfigurasi Algoritma"); sync_session_to_firebase(x_session_id)
     return {"status": "success"}
 
+@app.get("/stepwise/session-state/")
+async def get_session_state(x_session_id: Optional[str] = Header(None)):
+    await ensure_session(x_session_id)
+    return {"state": "UPLOADED" if x_session_id in sessions else "IDLE"}
+
 # --- 2. PREPROCESSING ---
 
 ORDINAL_RULES = {
@@ -153,6 +162,12 @@ async def stepwise_missing(x_session_id: Optional[str] = Header(None)):
     ensure_audit(x_session_id); audit_checkpoints[x_session_id]["05_Imputasi_Data"] = session["df"].copy()
     add_to_checklist(x_session_id, "Imputasi Data"); sync_session_to_firebase(x_session_id)
     return {"status": "success"}
+
+@app.get("/stepwise/missing-scan")
+async def missing_scan(x_session_id: Optional[str] = Header(None)):
+    session = await get_session(x_session_id); df = session["df"]; num_cols = df.select_dtypes(include=['number']).columns
+    stats = {col: {"count": int(df[col].isnull().sum()), "median": float(df[col].median())} for col in num_cols if df[col].isnull().sum() > 0}
+    return {"status": "success", "missing_by_column": stats}
 
 @app.post("/stepwise/outlier-detection/")
 async def stepwise_outlier(x_session_id: Optional[str] = Header(None)):
@@ -237,8 +252,9 @@ async def stepwise_compare_k(x_session_id: Optional[str] = Header(None)):
     res = []
     for k in range(2, 11):
         km = KMeans(n_clusters=k, n_init=5, random_state=42).fit(X); res.append({"k": k, "silhouette": safe_float(silhouette_score(X, km.labels_)), "dbi": safe_float(davies_bouldin_score(X, km.labels_))})
+    best_k_sil = max(res, key=lambda x: x["silhouette"])["k"]; best_k_dbi = min(res, key=lambda x: x["dbi"])["k"]
     add_to_checklist(x_session_id, "Optimasi Jumlah K"); sync_session_to_firebase(x_session_id)
-    return {"status": "success", "results": res, "best_k_dbi": min(res, key=lambda x: x["dbi"])["k"], "best_k_silhouette": max(res, key=lambda x: x["silhouette"])["k"], "interpretation": "Berdasarkan audit metrik, K=3 memiliki kestabilan terbaik."}
+    return {"status": "success", "results": res, "best_k_dbi": best_k_dbi, "best_k_silhouette": best_k_sil, "interpretation": f"Berdasarkan validasi metrik, K={best_k_dbi} adalah yang terbaik menurut DBI."}
 
 # --- 5. CLUSTERING ALGORITHMS ---
 
@@ -248,6 +264,14 @@ async def init_centroids_step(x_session_id: Optional[str] = Header(None), params
     weighted_c = get_weighted_x(raw_c, session["config"].get("ahp_weights"), feats); session["algo_state"] = {"iteration": 0, "centroids": weighted_c.tolist(), "features": feats, "k": k, "history": []}
     ensure_audit(x_session_id); audit_checkpoints[x_session_id]["10_Inisialisasi_Centroid"] = pd.DataFrame(weighted_c, columns=feats); add_to_checklist(x_session_id, "Inisialisasi Centroid"); sync_session_to_firebase(x_session_id)
     return {"status": "success", "centroids": weighted_c.tolist()}
+
+@app.post("/stepwise/init-centroids-ga/")
+async def init_ga_step(x_session_id: Optional[str] = Header(None), params: Dict[str, Any] = Body({"k": 3})):
+    session = await get_session(x_session_id); feats, k = session["config"]["features"], params.get("k", 3); X = get_weighted_x(session["df"][feats].fillna(0).values, session["config"].get("ahp_weights"), feats)
+    from sklearn.cluster import kmeans_plusplus
+    c, _ = kmeans_plusplus(X, n_clusters=k, random_state=42); session["algo_state"] = {"iteration": 0, "centroids": c.tolist(), "features": feats, "k": k, "history": []}
+    add_to_checklist(x_session_id, "Inisialisasi Centroid GA"); sync_session_to_firebase(x_session_id)
+    return {"status": "success", "centroids": c.tolist()}
 
 @app.post("/stepwise/calculate-distances/")
 async def calculate_distances_step(x_session_id: Optional[str] = Header(None)):
@@ -271,13 +295,23 @@ async def update_centroids_step(x_session_id: Optional[str] = Header(None)):
     ensure_audit(x_session_id); audit_checkpoints[x_session_id][f"13_Update_Centroid_{state['iteration']}"] = pd.DataFrame(new_c); add_to_checklist(x_session_id, f"Centroid Update #{state['iteration']}"); sync_session_to_firebase(x_session_id)
     return {"status": "success", "new_centroids": new_c, "iteration": state["iteration"], "movement": move, "sample_work": {"explanation": "Centroid baru dihitung dalam ruang terbobot."}}
 
+@app.post("/stepwise/check-convergence/")
+async def check_convergence(x_session_id: Optional[str] = Header(None)):
+    session = await get_session(x_session_id); state = session["algo_state"]; is_conv = state["history"][-1]["movement"] < 1e-4 if state["history"] else False
+    eval_res = {}
+    if is_conv:
+        eval_res = calculate_cluster_metrics(session["df"], state["features"], np.array(state["assignments"]), state["k"], session["config"].get("ahp_weights"))
+        session.update({"metrics": eval_res, "all_results": {session["config"].get("mode", "kmeans"): eval_res}})
+        ensure_audit(x_session_id); audit_checkpoints[x_session_id]["14_Stabilitas_Konvergensi"] = pd.DataFrame(state["history"]); add_to_checklist(x_session_id, "Convergence Reached")
+    sync_session_to_firebase(x_session_id)
+    return {"status": "success", "is_converged": is_conv, "iteration": state["iteration"], "history": state["history"], "centroids": state["centroids"], "evaluation": eval_res}
+
 @app.post("/stepwise/auto-converge/")
 async def auto_converge(x_session_id: Optional[str] = Header(None)):
     session = await get_session(x_session_id); state = session["algo_state"]; ahp, k, feats = session["config"].get("ahp_weights"), state["k"], state["features"]; X = get_weighted_x(session["df"][feats].fillna(0).values, ahp, feats)
     history = []; centroids = np.array(state["centroids"])
     for i in range(1, 101):
-        dists = np.linalg.norm(X[:, np.newaxis] - centroids, axis=2); assignments = np.argmin(dists, axis=1)
-        wcss = safe_float(np.sum(np.min(dists, axis=1)**2)); new_c = np.array([X[assignments == j].mean(axis=0) if len(X[assignments == j]) > 0 else centroids[j] for j in range(k)])
+        dists = np.linalg.norm(X[:, np.newaxis] - centroids, axis=2); assignments = np.argmin(dists, axis=1); wcss = safe_float(np.sum(np.min(dists, axis=1)**2)); new_c = np.array([X[assignments == j].mean(axis=0) if len(X[assignments == j]) > 0 else centroids[j] for j in range(k)])
         move = safe_float(np.linalg.norm(new_c - centroids)); history.append({"iter": i, "movement": move, "wcss": wcss}); centroids = new_c
         if move < 1e-4: break
     session["df"]["cluster"] = assignments.tolist(); eval_k = calculate_cluster_metrics(session["df"], feats, assignments, k, ahp)
@@ -318,6 +352,11 @@ async def export_excel_route(x_session_id: Optional[str] = Header(None)):
         ensure_audit(x_session_id)
         for name, df in audit_checkpoints.get(x_session_id, {}).items(): df.to_excel(writer, sheet_name=name[:31], index=False)
     output.seek(0); return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f"attachment; filename=Riset_SIMORBATAS.xlsx"})
+
+@app.get("/stepwise/export-pdf/")
+async def export_pdf_route(x_session_id: Optional[str] = Header(None)):
+    session = await get_session(x_session_id); pdf = ResearchReportPDF(); pdf.add_page(); pdf.chapter_title("LAPORAN RISET")
+    return StreamingResponse(io.BytesIO(pdf.output()), media_type="application/pdf")
 
 if __name__ == "__main__":
     import uvicorn; uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 7860)))
