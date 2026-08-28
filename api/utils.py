@@ -38,6 +38,13 @@ try:
 except Exception as e:
     print(f"Firebase Init Fail: {e}")
 
+def safe_float(val):
+    """S2 HARDENING: Ensures numeric values are JSON-safe (No NaN/Inf)."""
+    try:
+        if val is None or np.isnan(val) or np.isinf(val): return 0.0
+        return float(val)
+    except: return 0.0
+
 def sync_session_to_firebase(session_id: str):
     """Backs up the current session state to Firestore for serverless persistence."""
     if not db or session_id not in sessions: return
