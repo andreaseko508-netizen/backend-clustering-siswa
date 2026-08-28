@@ -253,14 +253,22 @@ async def stepwise_compare_k(x_session_id: Optional[str] = Header(None)):
 
 @app.post("/stepwise/init-centroids/")
 async def init_centroids_step(x_session_id: Optional[str] = Header(None), params: Dict[str, Any] = Body({"k": 3})):
-    session = await get_session(x_session_id); feats, k = session["config"]["features"], params.get("k", 3); raw_c = session["df"][feats].fillna(0).sample(n=k, random_state=42).values
-    weighted_c = get_weighted_x(raw_c, session["config"].get("ahp_weights"), feats); session["algo_state"] = {"iteration": 0, "centroids": weighted_c.tolist(), "features": feats, "k": k, "history": []}
-    ensure_audit(x_session_id); audit_checkpoints[x_session_id]["10_Inisialisasi_Centroid"] = pd.DataFrame(weighted_c, columns=feats); add_to_checklist(x_session_id, "Inisialisasi Centroid"); sync_session_to_firebase(x_session_id)
+    """Step 14: Force K=3 for SPK Consistency (Berprestasi, Bimbingan, Bantuan)."""
+    session = await get_session(x_session_id); feats = session["config"]["features"]
+    k = 3 # FORCED LOCK for SPK Research Model
+    raw_c = session["df"][feats].fillna(0).sample(n=k, random_state=42).values
+    weighted_c = get_weighted_x(raw_c, session["config"].get("ahp_weights"), feats)
+    session["algo_state"] = {"iteration": 0, "centroids": weighted_c.tolist(), "features": feats, "k": k, "history": []}
+    ensure_audit(x_session_id); audit_checkpoints[x_session_id]["10_Inisialisasi_Centroid"] = pd.DataFrame(weighted_c, columns=feats)
+    add_to_checklist(x_session_id, "Inisialisasi Centroid"); sync_session_to_firebase(x_session_id)
     return {"status": "success", "centroids": weighted_c.tolist()}
 
 @app.post("/stepwise/init-centroids-ga/")
 async def init_ga_step(x_session_id: Optional[str] = Header(None), params: Dict[str, Any] = Body({"k": 3})):
-    session = await get_session(x_session_id); feats, k = session["config"]["features"], params.get("k", 3); X = get_weighted_x(session["df"][feats].fillna(0).values, session["config"].get("ahp_weights"), feats)
+    """Step 14: Force K=3 for GA-based SPK Consistency."""
+    session = await get_session(x_session_id); feats = session["config"]["features"]
+    k = 3 # FORCED LOCK for SPK Research Model
+    X = get_weighted_x(session["df"][feats].fillna(0).values, session["config"].get("ahp_weights"), feats)
     from sklearn.cluster import kmeans_plusplus; c, _ = kmeans_plusplus(X, n_clusters=k, random_state=42)
     session["algo_state"] = {"iteration": 0, "centroids": c.tolist(), "features": feats, "k": k, "history": []}; add_to_checklist(x_session_id, "Inisialisasi GA"); sync_session_to_firebase(x_session_id)
     return {"status": "success", "centroids": c.tolist()}
