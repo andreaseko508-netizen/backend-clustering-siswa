@@ -407,9 +407,21 @@ async def get_final_analysis(x_session_id: Optional[str] = Header(None)):
 async def export_excel_route(x_session_id: Optional[str] = Header(None)):
     session = await get_session(x_session_id); output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        session["df"].to_excel(writer, sheet_name="Hasil_Final", index=False)
+        # S2 HARDENING: Adjust cluster labels to 1-based indexing for research consistency
+        df_export = session["df"].copy()
+        if "cluster" in df_export.columns:
+            df_export["cluster"] = df_export["cluster"] + 1
+
+        df_export.to_excel(writer, sheet_name="Hasil_Final", index=False)
+
         ensure_audit(x_session_id)
-        for name, df in audit_checkpoints.get(x_session_id, {}).items(): df.to_excel(writer, sheet_name=name[:31], index=False)
+        for name, df in audit_checkpoints.get(x_session_id, {}).items():
+            df_audit = df.copy()
+            # If this is the assignment checkpoint, also adjust to 1-based
+            if "Pengelompokan" in name and 0 in df_audit.values:
+                df_audit = df_audit + 1
+            df_audit.to_excel(writer, sheet_name=name[:31], index=False)
+
     output.seek(0); return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f"attachment; filename=Riset_SIMORBATAS.xlsx"})
 
 @app.get("/stepwise/export-pdf/")
