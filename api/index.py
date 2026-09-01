@@ -343,7 +343,7 @@ async def stability_audit(x_session_id: Optional[str] = Header(None)):
 @app.post("/stepwise/sensitivity-audit/")
 async def sensitivity_audit(x_session_id: Optional[str] = Header(None)):
     session = await get_valid_session(x_session_id); feats = session["config"]["features"]; X_raw = session["df"][feats].fillna(0).values
-    return perform_sensitivity_audit(X_raw, feats, session["config"]["ahp_weights"], session["config"]["k", 3], session["df"]["cluster"].values)
+    return perform_sensitivity_audit(X_raw, feats, session["config"].get("ahp_weights"), session["config"].get("k", 3), session["df"]["cluster"].values)
 
 @app.get("/stepwise/spatial-map/")
 async def spatial_map(x_session_id: Optional[str] = Header(None)):

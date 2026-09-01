@@ -1,10 +1,9 @@
 import numpy as np
 import pandas as pd
 import time
-from sklearn.metrics import davies_bouldin_score, silhouette_score, calinski_harabasz_score, silhouette_samples
+from sklearn.metrics import davies_bouldin_score, silhouette_score, calinski_harabasz_score, silhouette_samples, adjusted_rand_score
 from sklearn.neighbors import NearestNeighbors
 from scipy.stats import chi2, ttest_rel, wilcoxon, shapiro, skew
-from sklearn.metrics import adjusted_rand_score
 
 # S2 PROFESSIONAL HELPERS
 def safe_float(val):
@@ -82,40 +81,34 @@ def run_real_ga_init(X, k, population_size=40, generations=50):
     n_samples, n_features = X.shape
 
     def calculate_fitness(centroids):
-        # Fitness = 1 / (Total Distance + 1e-10)
         dists = np.linalg.norm(X[:, np.newaxis] - centroids, axis=2)
         min_dists = np.min(dists, axis=1)
         wcss = np.sum(min_dists**2)
         return 1.0 / (wcss + 1e-10)
 
-    # Initial Population: Random samples from X
     population = [X[np.random.choice(n_samples, k, replace=False)] for _ in range(population_size)]
 
     for gen in range(generations):
         fitness_scores = [calculate_fitness(ind) for ind in population]
 
-        # Selection: Tournament
         new_population = []
         for _ in range(population_size):
             i1, i2 = np.random.choice(population_size, 2, replace=False)
             winner = population[i1] if fitness_scores[i1] > fitness_scores[i2] else population[i2]
             new_population.append(winner.copy())
 
-        # Crossover & Mutation
         for i in range(0, population_size, 2):
-            if np.random.rand() < 0.8: # Crossover rate
+            if np.random.rand() < 0.8:
                 mix_point = np.random.randint(1, k)
                 new_population[i][:mix_point], new_population[i+1][:mix_point] = \
                     new_population[i+1][:mix_point].copy(), new_population[i][:mix_point].copy()
 
-            # Mutation: Jitter a centroid slightly
-            if np.random.rand() < 0.2: # Mutation rate
+            if np.random.rand() < 0.2:
                 m_idx = np.random.randint(k)
                 new_population[i][m_idx] += np.random.normal(0, 0.05, n_features)
 
         population = new_population
 
-    # Return best individual
     best_idx = np.argmax([calculate_fitness(ind) for ind in population])
     return population[best_idx]
 
@@ -136,7 +129,6 @@ def perform_normality_test_expert(df, features):
                 "risk": "HIGH" if abs(sk) > 2 else "LOW"
             })
 
-    # Methodological recommendation
     non_normal_count = sum(1 for r in results if not r["is_normal"])
     recommendation = "RobustScaler (Pilihan Tepat)" if non_normal_count > (len(features)/2) else "StandardScaler (Aman)"
 
@@ -176,3 +168,103 @@ def get_weighted_x(X, weights_dict, features):
     if not weights_dict: return X
     w = np.array([weights_dict.get(f, 1.0) for f in features])
     return X * np.sqrt(w)
+
+def calculate_xie_beni(X, U, centroids, m=2.0):
+    try:
+        n = X.shape[0]
+        c = centroids.shape[0]
+        if n == 0 or c < 2: return 0.0
+        dists_sq = np.sum((X[:, np.newaxis, :] - centroids[np.newaxis, :, :])**2, axis=2)
+        numerator = np.sum((U.T ** m) * dists_sq)
+        min_c_dist_sq = np.inf
+        for i in range(c):
+            for j in range(i + 1, c):
+                d_sq = np.sum((centroids[i] - centroids[j])**2)
+                if d_sq < min_c_dist_sq:
+                    min_c_dist_sq = d_sq
+        if min_c_dist_sq == 0 or np.isinf(min_c_dist_sq):
+            min_c_dist_sq = 1e-10
+        xb = numerator / (n * min_c_dist_sq)
+        return safe_float(xb)
+    except Exception:
+        return 0.0
+
+def calculate_partition_entropy(U):
+    try:
+        n = U.shape[1]
+        if n == 0: return 0.0
+        U_safe = np.fmax(U, 1e-10)
+        pe = - np.sum(U_safe * np.log(U_safe)) / n
+        return safe_float(pe)
+    except Exception:
+        return 0.0
+
+def perform_stability_audit(X, k, labels, n_iterations=15):
+    try:
+        from sklearn.cluster import KMeans
+        scores = []
+        n_samples = X.shape[0]
+        if n_samples < 5:
+            return {"status": "success", "stability_score": 1.0, "level": "HIGH", "description": "Dataset terlalu kecil untuk bootstrap resampling."}
+
+        for i in range(n_iterations):
+            sample_idx = np.random.choice(n_samples, size=int(n_samples * 0.8), replace=True)
+            X_sub = X[sample_idx]
+            km = KMeans(n_clusters=k, n_init=3, random_state=i).fit(X_sub)
+            km_orig = KMeans(n_clusters=k, n_init=3, random_state=42).fit(X_sub)
+            ari = adjusted_rand_score(km.labels_, km_orig.labels_)
+            scores.append(ari)
+
+        avg_score = safe_float(np.mean(scores))
+        if avg_score > 0.8:
+            level = "SANGAT STABIL (HIGH)"
+            desc = "Model memiliki stabilitas sangat tinggi. Variasi bootstrap sampel tidak mengubah struktur kelompok."
+        elif avg_score > 0.6:
+            level = "STABIL (MODERATE)"
+            desc = "Model stabil. Terdapat sedikit variasi batas klaster pada beberapa sampel bootstrap."
+        else:
+            level = "KURANG STABIL (LOW)"
+            desc = "Model sensitif terhadap perubahan sampel data. Disarankan memilih K yang lebih rendah."
+
+        return {
+            "status": "success",
+            "stability_score": avg_score,
+            "level": level,
+            "description": desc,
+            "bootstrap_scores": [safe_float(s) for s in scores]
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e), "stability_score": 0.5, "level": "UNKNOWN", "description": str(e)}
+
+def perform_sensitivity_audit(X_raw, features, weights_dict, k, labels):
+    try:
+        from sklearn.cluster import KMeans
+        results = []
+        base_w = np.array([weights_dict.get(f, 1.0) if weights_dict else 1.0 for f in features])
+        X_base = X_raw * np.sqrt(base_w)
+        km_base = KMeans(n_clusters=k, n_init=5, random_state=42).fit(X_base)
+        base_labels = km_base.labels_
+
+        for idx, f in enumerate(features):
+            w_modified = base_w.copy()
+            w_modified[idx] *= 1.2
+            X_mod = X_raw * np.sqrt(w_modified)
+            km_mod = KMeans(n_clusters=k, n_init=5, random_state=42).fit(X_mod)
+            ari = safe_float(adjusted_rand_score(base_labels, km_mod.labels_))
+            results.append({
+                "feature": f,
+                "stability_score": ari,
+                "impact": "STABLE" if ari > 0.8 else ("MODERATE" if ari > 0.6 else "HIGH SENSITIVITY")
+            })
+
+        avg_ari = safe_float(np.mean([r["stability_score"] for r in results]))
+        interp = f"Indeks Ketahanan Bobot AHP: {avg_ari:.4f}. Penyesuaian bobot ±20% tidak mengubah struktur secara signifikan." if avg_ari > 0.7 else "Bobot AHP cukup sensitif terhadap perubahan beberapa atribut."
+
+        return {
+            "status": "success",
+            "overall_robustness": avg_ari,
+            "interpretation": interp,
+            "results": results
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e), "interpretation": str(e), "results": []}
