@@ -467,7 +467,13 @@ async def ahp_calculate(x_session_id: Optional[str] = Header(None), params: Dict
 @app.post("/stepwise/elbow/")
 @app.post("/stepwise/elbow")
 async def stepwise_elbow(x_session_id: Optional[str] = Header(None)):
-    session = await get_valid_session(x_session_id); X = session["df"].select_dtypes(include=[np.number]).fillna(0).values
+    session = await get_valid_session(x_session_id)
+    config = session.get("config", {})
+    feats = config.get("features", list(session["df"].select_dtypes(include=['number']).columns))
+    protected_cols = set([config.get("identity", ""), config.get("label", "")] + (config.get("ignored", []) if isinstance(config.get("ignored", []), list) else []))
+    feats = [f for f in feats if f in session["df"].columns and f not in protected_cols]
+
+    X = get_weighted_x(session["df"][feats].fillna(0).values, config.get("ahp_weights"), feats)
     wcss = [{"k": i, "wcss": safe_float(KMeans(n_clusters=i, n_init=10, random_state=42).fit(X).inertia_)} for i in range(1, 11)]
     return {"status": "success", "data": wcss}
 
