@@ -168,12 +168,23 @@ async def stepwise_conversion(x_session_id: Optional[str] = Header(None)):
         "prestasi": {"tidak pernah":0,"tingkat sekolah":1,"tingkat kecamatan":2,"tingkat kabupaten":3,"tingkat provinsi":4,"tingkat nasional":5,"tingkat internasional":6},
         "kendaraan": {"jalan kaki":0,"sepeda":1,"motor":2,"mobil":3,"angkutan umum":4}
     }
+    mappings = {}
     for col in df.select_dtypes(include=['object']).columns:
         rule = next((v for k, v in ORD_RULES.items() if k in col.lower()), None)
-        if rule: df[col] = df[col].astype(str).str.lower().str.strip().map(rule).fillna(0).astype(int)
-        else: codes, _ = pd.factorize(df[col]); df[col] = codes
+        if rule:
+            mappings[col] = {str(k_r): str(v_r) for k_r, v_r in rule.items()}
+            df[col] = df[col].astype(str).str.lower().str.strip().map(rule).fillna(0).astype(int)
+        else:
+            codes, uniques = pd.factorize(df[col])
+            df[col] = codes
+            mappings[col] = {str(u): str(i) for i, u in enumerate(uniques)}
+
+    sample_work = {
+        "explanation": "Transformasi kategorikal (Label Encoding) mengkonversi variabel berdomain teks kualitatif ke domain integer kuantitatif berurut/faktorial.",
+        "formula": r"f: \text{Kategori} \to \mathbb{Z}^+"
+    }
     session["df"] = df; add_to_checklist(x_session_id, "Konversi Fitur")
-    return {"status": "success"}
+    return {"status": "success", "mappings": mappings, "sample_work": sample_work}
 
 @app.post("/stepwise/cleaning/")
 @app.post("/stepwise/cleaning")
