@@ -510,7 +510,7 @@ async def init_centroids_step(x_session_id: Optional[str] = Header(None), params
     X = get_weighted_x(session["df"][feats].fillna(0).values, config.get("ahp_weights"), feats)
 
     if "ga" in method or "hybrid" in method:
-        best_seeds = run_real_ga_init(X, k, population_size=50, generations=100)
+        best_seeds = run_real_ga_init(X, k, population_size=30, generations=25)
         msg = f"Inisialisasi Centroid Hybrid GA (Evolusi Populasi) Berhasil. K={k} Centroid Ter-optimasi."
         init_type = "Hybrid GA"
     else:
