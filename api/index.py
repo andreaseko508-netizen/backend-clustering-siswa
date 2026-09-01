@@ -163,27 +163,84 @@ async def get_session_state(x_session_id: Optional[str] = Header(None)):
 @app.post("/stepwise/conversion/")
 @app.post("/stepwise/conversion")
 async def stepwise_conversion(x_session_id: Optional[str] = Header(None)):
-    session = await get_valid_session(x_session_id); df = session["df"]
+    session = await get_valid_session(x_session_id)
+    df = session["df"]
+    config = session.get("config", {})
+
+    identity_col = config.get("identity", "")
+    label_col = config.get("label", "")
+    ignored_cols = config.get("ignored", [])
+    features = config.get("features", [])
+
+    # Metadata columns (NIS/ID, Nama, Ignored) are PROTECTED from mathematical conversion
+    protected_cols = set([identity_col, label_col] + (ignored_cols if isinstance(ignored_cols, list) else []))
+    protected_cols = {c for c in protected_cols if c}
+
     ORD_RULES = {
-        "prestasi": {"tidak pernah":0,"tingkat sekolah":1,"tingkat kecamatan":2,"tingkat kabupaten":3,"tingkat provinsi":4,"tingkat nasional":5,"tingkat internasional":6},
-        "kendaraan": {"jalan kaki":0,"sepeda":1,"motor":2,"mobil":3,"angkutan umum":4}
+        "prestasi": {
+            "tidak pernah": 0, "tidak ada": 0, "tidak": 0,
+            "tingkat sekolah": 1,
+            "tingkat kecamatan": 2,
+            "tingkat kabupaten": 3,
+            "tingkat provinsi": 4,
+            "tingkat nasional": 5,
+            "tingkat internasional": 6
+        },
+        "kendaraan": {
+            "jalan kaki": 0,
+            "sepeda": 1,
+            "motor": 2, "sepeda motor": 2,
+            "mobil": 3,
+            "angkutan umum": 4
+        },
+        "internet": {
+            "tidak": 0, "tidak ada": 0, "tidak punya": 0, "ridak": 0,
+            "ya": 1, "ada": 1, "punya": 1
+        }
     }
+
     mappings = {}
-    for col in df.select_dtypes(include=['object']).columns:
-        rule = next((v for k, v in ORD_RULES.items() if k in col.lower()), None)
-        if rule:
-            mappings[col] = {str(k_r): str(v_r) for k_r, v_r in rule.items()}
-            df[col] = df[col].astype(str).str.lower().str.strip().map(rule).fillna(0).astype(int)
-        else:
-            codes, uniques = pd.factorize(df[col])
-            df[col] = codes
-            mappings[col] = {str(u): str(i) for i, u in enumerate(uniques)}
+
+    # Target ONLY selected feature columns or non-protected columns
+    if features:
+        target_cols = [c for c in features if c in df.columns and c not in protected_cols]
+    else:
+        target_cols = [c for c in df.columns if c not in protected_cols]
+
+    for col in target_cols:
+        if df[col].dtype == 'object' or str(df[col].dtype) == 'category':
+            col_lower = col.lower()
+            matched_rule = None
+            for rule_key, rule_map in ORD_RULES.items():
+                if rule_key in col_lower:
+                    matched_rule = rule_map
+                    break
+
+            if matched_rule:
+                cleaned_series = df[col].astype(str).str.lower().str.strip()
+
+                display_map = {}
+                for raw_val in df[col].dropna().unique():
+                    raw_str = str(raw_val).strip()
+                    clean_str = raw_str.lower()
+                    code_val = matched_rule.get(clean_str, 0)
+                    display_map[raw_str] = str(code_val)
+
+                mappings[col] = display_map
+                df[col] = cleaned_series.map(matched_rule).fillna(0).astype(int)
+            else:
+                codes, uniques = pd.factorize(df[col])
+                df[col] = codes
+                mappings[col] = {str(u): str(i) for i, u in enumerate(uniques)}
 
     sample_work = {
-        "explanation": "Transformasi kategorikal (Label Encoding) mengkonversi variabel berdomain teks kualitatif ke domain integer kuantitatif berurut/faktorial.",
+        "explanation": "Transformasi kategorikal (Label Encoding & Ordinal Mapping) mengkonversi atribut fitur ke domain kuantitatif berurut. Kolom metadata (NIS/ID dan Nama Siswa) tidak dikonversi dan dikunci untuk identifikasi hasil akhir klaster.",
         "formula": r"f: \text{Kategori} \to \mathbb{Z}^+"
     }
-    session["df"] = df; add_to_checklist(x_session_id, "Konversi Fitur")
+
+    session["df"] = df
+    add_to_checklist(x_session_id, "Konversi Fitur")
+    sync_session_to_firebase(x_session_id)
     return {"status": "success", "mappings": mappings, "sample_work": sample_work}
 
 @app.post("/stepwise/cleaning/")
