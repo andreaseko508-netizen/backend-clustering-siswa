@@ -45,6 +45,11 @@ def safe_float(val):
         return float(val)
     except: return 0.0
 
+def ensure_audit(x_session_id: str):
+    """Ensures audit dictionary exists for the session."""
+    if x_session_id not in audit_checkpoints:
+        audit_checkpoints[x_session_id] = {}
+
 def sync_session_to_firebase(session_id: str):
     """Backs up the current session state to Firestore for serverless persistence."""
     if not db or session_id not in sessions: return
@@ -59,27 +64,15 @@ def sync_session_to_firebase(session_id: str):
                 del session["scaler"]
             except: pass
 
-        # 2. Serialize DataFrame (The most critical part)
+        # 2. Serialize DataFrame
         if "df" in session and isinstance(session["df"], pd.DataFrame):
             df = session["df"]
-            # S2 HARDENING: Always store column names explicitly
             session["df_columns"] = [str(c) for c in df.columns]
-            # Replace Inf/NaN with 0 for JSON safety in Firestore
             df_safe = df.replace([np.inf, -np.inf], np.nan).fillna(0)
             session["df_records"] = df_safe.to_dict(orient="records")
             del session["df"]
 
-        # 3. Clean algorithm results
-        if "all_results" in session:
-            res = {}
-            for k, v in session["all_results"].items():
-                if isinstance(v, dict):
-                    v_clean = v.copy()
-                    if "df" in v_clean: del v_clean["df"]
-                    res[k] = v_clean
-            session["all_results"] = res
-
-        # 4. Write to Firestore
+        # 3. Write to Firestore (Non-blocking as possible)
         db.collection("python_sessions").document(session_id).set(session)
     except Exception as e:
         print(f"Sync fail for {session_id}: {e}")
@@ -101,21 +94,14 @@ async def ensure_session(x_session_id: str):
                         data["scaler"] = pickle.loads(base64.b64decode(data["scaler_b64"]))
                     except: pass
 
-                # Restore DataFrame with column integrity
+                # Restore DataFrame
                 if "df_records" in data:
                     cols = data.get("df_columns")
                     df = pd.DataFrame(data["df_records"])
-                    if cols:
-                        # Ensure columns order and existence even if records were empty
-                        df = df.reindex(columns=cols)
-
-                    # S2 Hardening: Force numeric conversion for numeric columns
+                    if cols: df = df.reindex(columns=cols)
                     for col in df.columns:
-                        try:
-                            # Try to convert to numeric, if fails, keep as is
-                            df[col] = pd.to_numeric(df[col], errors='ignore')
+                        try: df[col] = pd.to_numeric(df[col], errors='ignore')
                         except: pass
-
                     data["df"] = df
 
                 sessions[x_session_id] = data
@@ -129,11 +115,10 @@ def add_to_checklist(x_session_id: str, step_name: str):
         if step_name not in checklist:
             checklist.append(step_name)
         sessions[x_session_id]["audit"]["execution_checklist"] = checklist
-        # Sync immediately for persistence
         sync_session_to_firebase(x_session_id)
 
 def get_representative_data(df):
-    """Returns a visual preview (3 first, 2 last rows) for UI efficiency."""
+    """Returns a visual preview for UI efficiency."""
     if df is None or df.empty: return []
     if len(df) <= 5: return df.to_dict(orient="records")
     return pd.concat([df.head(3), df.tail(2)]).to_dict(orient="records")

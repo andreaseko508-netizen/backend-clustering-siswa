@@ -13,9 +13,9 @@ from typing import Optional, List, Dict, Any
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score, davies_bouldin_score
 
-# --- SYSTEM ARCHITECT LOGGING ---
+# --- LOGGING ---
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("SIMORBATAS-CORE")
+logger = logging.getLogger("SIMORBATAS")
 
 # --- DYNAMIC PATH RECOVERY ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -25,22 +25,19 @@ if current_dir not in sys.path:
 # --- PROFESSIONAL MODULE IMPORT ---
 try:
     from utils import (
-        sessions, audit_checkpoints, db, ensure_session,
-        sync_session_to_firebase, add_to_checklist, get_representative_data
+        sessions, audit_checkpoints, db, ensure_session, ensure_audit,
+        sync_session_to_firebase, add_to_checklist, get_representative_data, safe_float
     )
     from statistics import (
         calculate_cluster_metrics, run_real_ga_init, get_weighted_x,
-        perform_normality_test_expert, calculate_hopkins, calculate_ahp_weights_and_cr, safe_float
+        perform_normality_test_expert, calculate_hopkins, calculate_ahp_weights_and_cr
     )
-    from reports import ResearchReportPDF
 except ImportError:
-    from api.utils import sessions, audit_checkpoints, db, ensure_session, sync_session_to_firebase, add_to_checklist, get_representative_data
-    from api.statistics import calculate_cluster_metrics, run_real_ga_init, get_weighted_x, perform_normality_test_expert, calculate_hopkins, calculate_ahp_weights_and_cr, safe_float
-    from api.reports import ResearchReportPDF
+    from api.utils import sessions, audit_checkpoints, db, ensure_session, ensure_audit, sync_session_to_firebase, add_to_checklist, get_representative_data, safe_float
+    from api.statistics import calculate_cluster_metrics, run_real_ga_init, get_weighted_x, perform_normality_test_expert, calculate_hopkins, calculate_ahp_weights_and_cr
 
-app = FastAPI(title="SIMORBATAS Enterprise AI Runtime", version="21.0.0")
+app = FastAPI(title="SIMORBATAS Enterprise AI Runtime", version="21.5.0")
 
-# --- CORE ARCHITECT HELPERS ---
 async def get_valid_session(x_session_id: str):
     await ensure_session(x_session_id)
     if x_session_id not in sessions:
@@ -48,7 +45,6 @@ async def get_valid_session(x_session_id: str):
     return sessions[x_session_id]
 
 def reorder_clusters_by_quality(df, features, assignments, k):
-    """S2 Standard: Ensures C1 is always the 'Higher Performance' group."""
     try:
         scores = []
         for i in range(k):
@@ -67,52 +63,63 @@ def reorder_clusters_by_quality(df, features, assignments, k):
 
 @app.get("/")
 async def root():
-    return {"status": "Active", "engine": "SIMORBATAS-Vercel", "version": "21.0.0"}
+    return {"status": "Active", "engine": "SIMORBATAS-Vercel", "version": "21.5.0"}
 
-# --- 1. DATA ACQUISITION & INTEGRITY ---
+# --- 1. DATA ACQUISITION ---
 
 @app.post("/stepwise/upload/")
 async def stepwise_upload(file: UploadFile = File(...), x_session_id: Optional[str] = Header(None)):
     if not x_session_id: x_session_id = str(uuid.uuid4())
     try:
         content = await file.read()
-        df = pd.read_csv(io.BytesIO(content)) if file.filename.endswith('.csv') else pd.read_excel(io.BytesIO(content))
+        file_ext = file.filename.split('.')[-1].lower()
+
+        if file_ext == 'csv':
+            df = pd.read_csv(io.BytesIO(content))
+        elif file_ext in ['xlsx', 'xls']:
+            # Ensure openpyxl is used for xlsx
+            df = pd.read_excel(io.BytesIO(content), engine='openpyxl' if file_ext == 'xlsx' else None)
+        else:
+            raise HTTPException(400, "Format file tidak didukung. Gunakan Excel atau CSV.")
+
         df.columns = [str(c).strip() for c in df.columns]
         df = df.replace([np.inf, -np.inf], np.nan)
+
         sessions[x_session_id] = {
-            "df": df, "filename": file.filename, "config": {"k": 3, "features": []},
-            "start_time": time.time(), "metrics": {}, "checkpoints": {},
+            "df": df, "filename": file.filename, "config": {"k": 3, "features": [], "ahp_weights": {}},
+            "start_time": time.time(), "metrics": {},
             "audit": {"execution_checklist": []}, "algo_state": {"iteration": 0, "history": []}
         }
-        ensure_audit(x_session_id); audit_checkpoints[x_session_id]["01_Data_Asli"] = df.copy()
+
+        ensure_audit(x_session_id)
+        audit_checkpoints[x_session_id]["01_Data_Asli"] = df.copy()
+
         sync_session_to_firebase(x_session_id)
         return {"status": "success", "session_id": x_session_id, "jumlah_data": len(df), "columns": list(df.columns)}
     except Exception as e:
-        logger.error(f"Critical Upload Error: {e}")
-        raise HTTPException(500, str(e))
+        logger.error(f"Upload Error: {str(e)}")
+        raise HTTPException(500, f"Gagal memproses file: {str(e)}")
 
 @app.get("/stepwise/raw-data/")
 async def get_raw_data(x_session_id: Optional[str] = Header(None)):
     session = await get_valid_session(x_session_id)
-    return {"columns": list(session["df"].columns), "total_rows": len(session["df"]), "data": pd.DataFrame(get_representative_data(session["df"])).fillna(0).to_dict(orient="records")}
+    return {"columns": list(session["df"].columns), "total_rows": len(session["df"]), "data": get_representative_data(session["df"])}
 
-# --- 2. PROFESSIONAL PREPROCESSING ---
+# --- 2. PREPROCESSING ---
 
 @app.post("/stepwise/conversion/")
 async def stepwise_conversion(x_session_id: Optional[str] = Header(None)):
     session = await get_valid_session(x_session_id); df = session["df"]
-    # Internal Ordinal Mapping Strategy
     ORD_RULES = {
         "prestasi": {"tidak pernah":0,"tingkat sekolah":1,"tingkat kecamatan":2,"tingkat kabupaten":3,"tingkat provinsi":4,"tingkat nasional":5,"tingkat internasional":6},
         "kendaraan": {"jalan kaki":0,"sepeda":1,"motor":2,"mobil":3,"angkutan umum":4}
     }
-    mapping_report = {}
     for col in df.select_dtypes(include=['object']).columns:
         rule = next((v for k, v in ORD_RULES.items() if k in col.lower()), None)
         if rule:
             df[col] = df[col].astype(str).str.lower().str.strip().map(rule).fillna(0).astype(int)
         else:
-            codes, uniques = pd.factorize(df[col])
+            codes, _ = pd.factorize(df[col])
             df[col] = codes
     session["df"] = df; add_to_checklist(x_session_id, "Konversi Fitur")
     return {"status": "success"}
@@ -159,14 +166,12 @@ async def stepwise_norm(x_session_id: Optional[str] = Header(None)):
     add_to_checklist(x_session_id, "Normalisasi Data")
     return {"status": "success"}
 
-# --- 4. ADVANCED K-MEANS CORE (GA OPTIMIZED) ---
+# --- 4. ADVANCED K-MEANS CORE ---
 
 @app.post("/stepwise/init-centroids/")
 async def init_centroids_step(x_session_id: Optional[str] = Header(None), params: Dict[str, Any] = Body({"k": 3})):
-    """PHASE 1: Genetic Algorithm Seed Discovery."""
     session = await get_valid_session(x_session_id); feats = session["config"]["features"]; k = 3
     X = get_weighted_x(session["df"][feats].fillna(0).values, session["config"].get("ahp_weights"), feats)
-    # Perform Real GA Discovery
     best_seeds = run_real_ga_init(X, k, population_size=40, generations=50)
     session["algo_state"] = {"iteration": 0, "centroids": best_seeds.tolist(), "features": feats, "k": k, "history": []}
     add_to_checklist(x_session_id, "Inisialisasi GA"); sync_session_to_firebase(x_session_id)
@@ -187,7 +192,6 @@ async def assign_clusters_step(x_session_id: Optional[str] = Header(None)):
 
 @app.post("/stepwise/auto-converge/")
 async def auto_converge(x_session_id: Optional[str] = Header(None)):
-    """PHASE 2: Enterprise Grade Iteration & Rank Sync."""
     session = await get_valid_session(x_session_id); state = session["algo_state"]; ahp, k, feats = session["config"].get("ahp_weights"), state["k"], state["features"]
     X = get_weighted_x(session["df"][feats].fillna(0).values, ahp, feats)
     history = []; centroids = np.array(state["centroids"])
@@ -197,7 +201,6 @@ async def auto_converge(x_session_id: Optional[str] = Header(None)):
         move = safe_float(np.linalg.norm(new_c - centroids)); history.append({"iter": i, "movement": move, "wcss": wcss}); centroids = new_c
         if move < 1e-4: break
 
-    # S2 Rank Sync
     new_labels, remap = reorder_clusters_by_quality(session["df"], feats, assignments, k)
     final_centroids = [centroids[old_id].tolist() for old_id, _ in sorted(remap.items(), key=lambda x: x[1])]
     session["df"]["cluster"] = new_labels.tolist()
