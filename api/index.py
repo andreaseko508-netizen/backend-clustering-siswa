@@ -345,26 +345,116 @@ async def get_correlation_analysis(x_session_id: Optional[str] = Header(None)):
 @app.post("/stepwise/normalization/")
 @app.post("/stepwise/normalization")
 async def stepwise_norm(x_session_id: Optional[str] = Header(None)):
-    session = await get_valid_session(x_session_id); from sklearn.preprocessing import MinMaxScaler; scaler = MinMaxScaler()
-    num_cols = session["df"].select_dtypes(include=['number']).columns
-    if len(num_cols) > 0: session["df"][num_cols] = scaler.fit_transform(session["df"][num_cols]); session["scaler"] = scaler
-    add_to_checklist(x_session_id, "Normalisasi Data"); return {"status": "success"}
+    session = await get_valid_session(x_session_id)
+    df = session["df"]
+
+    # Store unscaled backup for clean re-scaling
+    if "unscaled_df" not in session:
+        session["unscaled_df"] = df.copy()
+    else:
+        df = session["unscaled_df"].copy()
+
+    config = session.get("config", {})
+    identity_col = config.get("identity", "")
+    label_col = config.get("label", "")
+    ignored_cols = config.get("ignored", [])
+    features = config.get("features", [])
+
+    protected_cols = set([identity_col, label_col] + (ignored_cols if isinstance(ignored_cols, list) else []))
+    protected_cols = {c for c in protected_cols if c}
+
+    if features:
+        num_cols = [c for c in features if c in df.columns and c not in protected_cols]
+    else:
+        num_cols = [c for c in df.select_dtypes(include=['number']).columns if c not in protected_cols]
+
+    from sklearn.preprocessing import MinMaxScaler
+    scaler = MinMaxScaler()
+    if len(num_cols) > 0:
+        df[num_cols] = scaler.fit_transform(df[num_cols])
+        session["scaler"] = scaler
+        session["scaler_type"] = "minmax"
+
+    session["df"] = df
+    add_to_checklist(x_session_id, "Normalisasi Min-Max")
+    sync_session_to_firebase(x_session_id)
+    return {"status": "success", "scaler_type": "minmax", "columns_scaled": num_cols}
+
 
 @app.post("/stepwise/standardization/")
 @app.post("/stepwise/standardization")
 async def stepwise_standard(x_session_id: Optional[str] = Header(None)):
-    session = await get_valid_session(x_session_id); from sklearn.preprocessing import StandardScaler; scaler = StandardScaler()
-    num_cols = session["df"].select_dtypes(include=['number']).columns
-    if len(num_cols) > 0: session["df"][num_cols] = scaler.fit_transform(session["df"][num_cols]); session["scaler"] = scaler
-    add_to_checklist(x_session_id, "Standardisasi Data"); return {"status": "success"}
+    session = await get_valid_session(x_session_id)
+    df = session["df"]
+
+    if "unscaled_df" not in session:
+        session["unscaled_df"] = df.copy()
+    else:
+        df = session["unscaled_df"].copy()
+
+    config = session.get("config", {})
+    identity_col = config.get("identity", "")
+    label_col = config.get("label", "")
+    ignored_cols = config.get("ignored", [])
+    features = config.get("features", [])
+
+    protected_cols = set([identity_col, label_col] + (ignored_cols if isinstance(ignored_cols, list) else []))
+    protected_cols = {c for c in protected_cols if c}
+
+    if features:
+        num_cols = [c for c in features if c in df.columns and c not in protected_cols]
+    else:
+        num_cols = [c for c in df.select_dtypes(include=['number']).columns if c not in protected_cols]
+
+    from sklearn.preprocessing import StandardScaler
+    scaler = StandardScaler()
+    if len(num_cols) > 0:
+        df[num_cols] = scaler.fit_transform(df[num_cols])
+        session["scaler"] = scaler
+        session["scaler_type"] = "zscore"
+
+    session["df"] = df
+    add_to_checklist(x_session_id, "Standardisasi Z-Score")
+    sync_session_to_firebase(x_session_id)
+    return {"status": "success", "scaler_type": "zscore", "columns_scaled": num_cols}
+
 
 @app.post("/stepwise/robust-scaling/")
 @app.post("/stepwise/robust-scaling")
 async def stepwise_robust_scaling(x_session_id: Optional[str] = Header(None)):
-    session = await get_valid_session(x_session_id); from sklearn.preprocessing import RobustScaler; scaler = RobustScaler()
-    num_cols = session["df"].select_dtypes(include=['number']).columns
-    if len(num_cols) > 0: session["df"][num_cols] = scaler.fit_transform(session["df"][num_cols]); session["scaler"] = scaler
-    add_to_checklist(x_session_id, "Robust Scaling"); return {"status": "success"}
+    session = await get_valid_session(x_session_id)
+    df = session["df"]
+
+    if "unscaled_df" not in session:
+        session["unscaled_df"] = df.copy()
+    else:
+        df = session["unscaled_df"].copy()
+
+    config = session.get("config", {})
+    identity_col = config.get("identity", "")
+    label_col = config.get("label", "")
+    ignored_cols = config.get("ignored", [])
+    features = config.get("features", [])
+
+    protected_cols = set([identity_col, label_col] + (ignored_cols if isinstance(ignored_cols, list) else []))
+    protected_cols = {c for c in protected_cols if c}
+
+    if features:
+        num_cols = [c for c in features if c in df.columns and c not in protected_cols]
+    else:
+        num_cols = [c for c in df.select_dtypes(include=['number']).columns if c not in protected_cols]
+
+    from sklearn.preprocessing import RobustScaler
+    scaler = RobustScaler()
+    if len(num_cols) > 0:
+        df[num_cols] = scaler.fit_transform(df[num_cols])
+        session["scaler"] = scaler
+        session["scaler_type"] = "robust"
+
+    session["df"] = df
+    add_to_checklist(x_session_id, "Robust Scaling")
+    sync_session_to_firebase(x_session_id)
+    return {"status": "success", "scaler_type": "robust", "columns_scaled": num_cols}
 
 @app.post("/stepwise/ahp-calculate/")
 @app.post("/stepwise/ahp-calculate")
