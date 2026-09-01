@@ -178,24 +178,24 @@ async def stepwise_conversion(x_session_id: Optional[str] = Header(None)):
 
     ORD_RULES = {
         "prestasi": {
-            "tidak pernah": 0, "tidak ada": 0, "tidak": 0,
-            "tingkat sekolah": 1,
-            "tingkat kecamatan": 2,
-            "tingkat kabupaten": 3,
-            "tingkat provinsi": 4,
-            "tingkat nasional": 5,
-            "tingkat internasional": 6
+            "tidak pernah": 0, "tidak ada": 0, "tidak": 0, "0": 0,
+            "tingkat sekolah": 1, "sekolah": 1, "1": 1,
+            "tingkat kecamatan": 2, "kecamatan": 2, "2": 2,
+            "tingkat kabupaten": 3, "tingkat kabupaten/kota": 3, "kabupaten": 3, "kabupaten/kota": 3, "3": 3,
+            "tingkat provinsi": 4, "provinsi": 4, "4": 4,
+            "tingkat nasional": 5, "nasional": 5, "5": 5,
+            "tingkat internasional": 6, "internasional": 6, "6": 6
         },
         "kendaraan": {
-            "jalan kaki": 0,
-            "sepeda": 1,
-            "motor": 2, "sepeda motor": 2,
-            "mobil": 3,
-            "angkutan umum": 4
+            "jalan kaki": 0, "jalan kaki/tidak ada": 0, "tidak ada": 0, "0": 0,
+            "sepeda": 1, "1": 1,
+            "motor": 2, "sepeda motor": 2, "2": 2,
+            "mobil": 3, "3": 3,
+            "angkutan umum": 4, "4": 4
         },
         "internet": {
-            "tidak": 0, "tidak ada": 0, "tidak punya": 0, "ridak": 0,
-            "ya": 1, "ada": 1, "punya": 1
+            "tidak": 0, "tidak ada": 0, "tidak punya": 0, "ridak": 0, "0": 0,
+            "ya": 1, "ada": 1, "punya": 1, "1": 1
         }
     }
 
@@ -208,8 +208,12 @@ async def stepwise_conversion(x_session_id: Optional[str] = Header(None)):
         target_cols = [c for c in df.columns if c not in protected_cols]
 
     for col in target_cols:
-        if df[col].dtype == 'object' or str(df[col].dtype) == 'category':
-            col_lower = col.lower()
+        # Robust check: column is non-numeric OR contains string/text values
+        is_numeric = pd.api.types.is_numeric_dtype(df[col])
+        has_strings = df[col].apply(lambda x: isinstance(x, str)).any()
+
+        if not is_numeric or has_strings:
+            col_lower = str(col).lower()
             matched_rule = None
             for rule_key, rule_map in ORD_RULES.items():
                 if rule_key in col_lower:
@@ -217,20 +221,30 @@ async def stepwise_conversion(x_session_id: Optional[str] = Header(None)):
                     break
 
             if matched_rule:
-                cleaned_series = df[col].astype(str).str.lower().str.strip()
-
                 display_map = {}
-                for raw_val in df[col].dropna().unique():
-                    raw_str = str(raw_val).strip()
+                converted_vals = []
+
+                for val in df[col]:
+                    raw_str = str(val).strip() if pd.notnull(val) else ""
                     clean_str = raw_str.lower()
-                    code_val = matched_rule.get(clean_str, 0)
-                    display_map[raw_str] = str(code_val)
+
+                    code_val = matched_rule.get(clean_str)
+                    if code_val is None:
+                        # Fallback substring match
+                        code_val = 0
+                        for k_rule, v_rule in matched_rule.items():
+                            if k_rule in clean_str or clean_str in k_rule:
+                                code_val = v_rule
+                                break
+
+                    display_map[raw_str if raw_str else "N/A"] = str(code_val)
+                    converted_vals.append(code_val)
 
                 mappings[col] = display_map
-                df[col] = cleaned_series.map(matched_rule).fillna(0).astype(int)
+                df[col] = pd.Series(converted_vals, index=df.index).astype(int)
             else:
-                codes, uniques = pd.factorize(df[col])
-                df[col] = codes
+                codes, uniques = pd.factorize(df[col].astype(str))
+                df[col] = pd.Series(codes, index=df.index).astype(int)
                 mappings[col] = {str(u): str(i) for i, u in enumerate(uniques)}
 
     sample_work = {
