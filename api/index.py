@@ -497,11 +497,57 @@ async def stepwise_compare_k(x_session_id: Optional[str] = Header(None)):
 @app.post("/stepwise/init-centroids/")
 @app.post("/stepwise/init-centroids")
 async def init_centroids_step(x_session_id: Optional[str] = Header(None), params: Dict[str, Any] = Body({"k": 3})):
-    session = await get_valid_session(x_session_id); feats = session["config"]["features"]; k = 3
-    X = get_weighted_x(session["df"][feats].fillna(0).values, session["config"].get("ahp_weights"), feats)
-    best_seeds = run_real_ga_init(X, k, population_size=40, generations=50)
-    session["algo_state"] = {"iteration": 0, "centroids": best_seeds.tolist(), "features": feats, "k": k, "history": []}
-    add_to_checklist(x_session_id, "Inisialisasi GA"); return {"status": "success", "centroids": best_seeds.tolist(), "features": feats}
+    session = await get_valid_session(x_session_id)
+    config = session.get("config", {})
+
+    feats = config.get("features", list(session["df"].select_dtypes(include=['number']).columns))
+    protected_cols = set([config.get("identity", ""), config.get("label", "")] + (config.get("ignored", []) if isinstance(config.get("ignored", []), list) else []))
+    feats = [f for f in feats if f in session["df"].columns and f not in protected_cols]
+
+    k = params.get("k", 3)
+    method = str(params.get("init_method", params.get("strategy", "systematic"))).lower()
+
+    X = get_weighted_x(session["df"][feats].fillna(0).values, config.get("ahp_weights"), feats)
+
+    if "ga" in method or "hybrid" in method:
+        best_seeds = run_real_ga_init(X, k, population_size=50, generations=100)
+        msg = f"Inisialisasi Centroid Hybrid GA (Evolusi Populasi) Berhasil. K={k} Centroid Ter-optimasi."
+        init_type = "Hybrid GA"
+    else:
+        n_samples = len(X)
+        row_scores = np.sum(X, axis=1)
+        sorted_indices = np.argsort(row_scores)
+        percentiles = np.linspace(10, 90, k)
+
+        sampled_centroids = []
+        for p in percentiles:
+            idx = int(np.clip(p / 100.0 * (n_samples - 1), 0, n_samples - 1))
+            sampled_centroids.append(X[sorted_indices[idx]])
+
+        best_seeds = np.array(sampled_centroids)
+        msg = f"Inisialisasi Centroid Deterministik (Head-Mid-Tail) Berhasil. K={k} Centroid Terpilih."
+        init_type = "Systematic Head-Mid-Tail"
+
+    centroids_list = best_seeds.tolist()
+
+    session["algo_state"] = {
+        "iteration": 0,
+        "centroids": centroids_list,
+        "features": feats,
+        "k": k,
+        "history": [],
+        "init_type": init_type
+    }
+
+    add_to_checklist(x_session_id, f"Inisialisasi Centroid ({init_type})")
+    sync_session_to_firebase(x_session_id)
+    return {
+        "status": "success",
+        "centroids": centroids_list,
+        "features": feats,
+        "message": msg,
+        "init_type": init_type
+    }
 
 @app.post("/stepwise/calculate-distances/")
 @app.post("/stepwise/calculate-distances")
