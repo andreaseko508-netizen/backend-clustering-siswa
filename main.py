@@ -79,10 +79,27 @@ async def stepwise_upload(file: UploadFile = File(...), x_session_id: Optional[s
     if not x_session_id: x_session_id = str(uuid.uuid4())
     try:
         content = await file.read()
-        file_ext = file.filename.split('.')[-1].lower()
-        if file_ext == 'csv': df = pd.read_csv(io.BytesIO(content))
-        elif file_ext in ['xlsx', 'xls']: df = pd.read_excel(io.BytesIO(content), engine='openpyxl' if file_ext == 'xlsx' else None)
-        else: raise HTTPException(400, "Format file tidak didukung.")
+        file_ext = file.filename.split('.')[-1].lower() if '.' in file.filename else ''
+        df = None
+
+        if file_ext == 'csv':
+            try:
+                df = pd.read_csv(io.BytesIO(content))
+            except Exception:
+                df = pd.read_excel(io.BytesIO(content))
+        elif file_ext in ['xlsx', 'xls']:
+            try:
+                df = pd.read_excel(io.BytesIO(content))
+            except Exception:
+                df = pd.read_csv(io.BytesIO(content))
+        else:
+            try:
+                df = pd.read_excel(io.BytesIO(content))
+            except Exception:
+                try:
+                    df = pd.read_csv(io.BytesIO(content))
+                except Exception:
+                    raise HTTPException(400, "Format file tidak dapat dibaca. Pastikan berkas berformat Excel (.xlsx/.xls) atau CSV (.csv).")
 
         df.columns = [str(c).strip() for c in df.columns]
         df = df.replace([np.inf, -np.inf], np.nan)
@@ -94,7 +111,11 @@ async def stepwise_upload(file: UploadFile = File(...), x_session_id: Optional[s
         ensure_audit(x_session_id); audit_checkpoints[x_session_id]["01_Data_Asli"] = df.copy()
         sync_session_to_firebase(x_session_id)
         return {"status": "success", "session_id": x_session_id, "jumlah_data": len(df), "columns": list(df.columns)}
-    except Exception as e: raise HTTPException(500, str(e))
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        logger.error(f"Upload Error: {str(e)}")
+        raise HTTPException(500, f"Gagal membaca dataset: {str(e)}")
 
 @app.get("/stepwise/raw-data/")
 async def get_raw_data(x_session_id: Optional[str] = Header(None)):
