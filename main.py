@@ -558,9 +558,34 @@ async def init_centroids_step(x_session_id: Optional[str] = Header(None), params
 @app.post("/stepwise/calculate-distances/")
 @app.post("/stepwise/calculate-distances")
 async def calculate_distances_step(x_session_id: Optional[str] = Header(None)):
-    session = await get_valid_session(x_session_id); state = session["algo_state"]; X = get_weighted_x(session["df"][state["features"]].fillna(0).values, session["config"].get("ahp_weights"), state["features"])
-    dists = [np.linalg.norm(np.array(state["centroids"]) - row, axis=1).tolist() for row in X]
-    state["distances"] = dists; return {"status": "success", "sample_work": {"distances": dists[0]}}
+    session = await get_valid_session(x_session_id)
+    state = session.get("algo_state")
+    if not state or "centroids" not in state:
+        return {"status": "error", "message": "Inisialisasi centroid belum dilakukan!"}
+
+    feats = state["features"]
+    centroids = np.array(state["centroids"])
+
+    config = session.get("config", {})
+    X = get_weighted_x(session["df"][feats].fillna(0).values, config.get("ahp_weights"), feats)
+
+    dists = np.linalg.norm(X[:, np.newaxis] - centroids, axis=2).tolist()
+    state["distances"] = dists
+
+    sample_matrix = dists[:50]
+    sample_work = {
+        "distances": dists[0],
+        "explanation": "Jarak Euclidean dihitung sebagai L2 Norm antara vektor sampel siswa dan setiap centroid klaster."
+    }
+
+    add_to_checklist(x_session_id, "Kalkulasi Jarak Euclidean")
+    sync_session_to_firebase(x_session_id)
+    return {
+        "status": "success",
+        "distance_matrix_sample": sample_matrix,
+        "sample_work": sample_work,
+        "total_rows": len(dists)
+    }
 
 @app.post("/stepwise/assign-clusters/")
 @app.post("/stepwise/assign-clusters")
