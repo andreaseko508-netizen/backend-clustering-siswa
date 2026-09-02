@@ -539,6 +539,7 @@ async def init_centroids_step(x_session_id: Optional[str] = Header(None), params
     session["algo_state"] = {
         "iteration": 0,
         "centroids": centroids_list,
+        "init_centroids": centroids_list,
         "features": feats,
         "k": k,
         "history": [],
@@ -612,19 +613,25 @@ async def auto_converge(x_session_id: Optional[str] = Header(None)):
     session = await get_valid_session(x_session_id)
     state = session.get("algo_state", {})
 
-    # Fallback default parameters if state is not initialized
-    feats = state.get("features", session["config"].get("features", list(session["df"].select_dtypes(include=['number']).columns)))
-    protected_cols = set([session["config"].get("identity", ""), session["config"].get("label", "")] + (session["config"].get("ignored", []) if isinstance(session["config"].get("ignored", []), list) else []))
+    config = session.get("config", {})
+    feats = state.get("features", config.get("features", list(session["df"].select_dtypes(include=['number']).columns)))
+    config_ignored = config.get("ignored", [])
+    protected_cols = set([config.get("identity", ""), config.get("label", "")] + (config_ignored if isinstance(config_ignored, list) else []))
     feats = [f for f in feats if f in session["df"].columns and f not in protected_cols]
 
-    k = state.get("k", session["config"].get("k", 3))
-    ahp = session["config"].get("ahp_weights")
+    k = state.get("k", config.get("k", 3))
+    ahp = config.get("ahp_weights")
 
     X = get_weighted_x(session["df"][feats].fillna(0).values, ahp, feats)
 
-    centroids = np.array(state.get("centroids", X[:k]))
-    if len(centroids) != k:
-        centroids = X[:k]
+    # ALWAYS start convergence path from initial seeds (init_centroids) if present
+    init_c = state.get("init_centroids")
+    if init_c and len(init_c) == k:
+        centroids = np.array(init_c)
+    else:
+        centroids = np.array(state.get("centroids", X[:k]))
+        if len(centroids) != k:
+            centroids = X[:k]
 
     history = []
     assignments = np.zeros(len(X), dtype=int)
@@ -633,13 +640,21 @@ async def auto_converge(x_session_id: Optional[str] = Header(None)):
         dists = np.linalg.norm(X[:, np.newaxis] - centroids, axis=2)
         assignments = np.argmin(dists, axis=1)
         wcss = safe_float(np.sum(np.min(dists, axis=1)**2))
+
         new_c = np.array([X[assignments == j].mean(axis=0) if len(X[assignments == j]) > 0 else centroids[j] for j in range(k)])
         move = safe_float(np.linalg.norm(new_c - centroids))
-        history.append({"iter": i, "movement": move, "wcss": wcss})
+
+        history.append({
+            "iter": i,
+            "movement": move,
+            "wcss": wcss
+        })
+
         centroids = new_c
-        if move < 1e-4:
+        if move < 1e-4 and i >= 2:
             break
 
+    # Rank-Based Reordering (C1, C2, C3)
     new_labels, remap = reorder_clusters_by_quality(session["df"], feats, assignments, k)
     final_centroids = [centroids[old_id].tolist() for old_id, _ in sorted(remap.items(), key=lambda x: x[1])]
 
