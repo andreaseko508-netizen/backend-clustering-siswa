@@ -86,27 +86,32 @@ async def stepwise_upload(file: UploadFile = File(...), x_session_id: Optional[s
     if not x_session_id: x_session_id = str(uuid.uuid4())
     try:
         content = await file.read()
+        if not content:
+            raise HTTPException(400, "Berkas kosong. Silakan pilih berkas Excel (.xlsx) yang berisi data.")
+
         file_ext = file.filename.split('.')[-1].lower() if '.' in file.filename else ''
         df = None
+        read_errors = []
 
-        if file_ext == 'csv':
+        if file_ext in ['xlsx', 'xls'] or file_ext == '':
             try:
-                df = pd.read_csv(io.BytesIO(content))
-            except Exception:
-                df = pd.read_excel(io.BytesIO(content))
-        elif file_ext in ['xlsx', 'xls']:
-            try:
-                df = pd.read_excel(io.BytesIO(content))
-            except Exception:
-                df = pd.read_csv(io.BytesIO(content))
-        else:
-            try:
-                df = pd.read_excel(io.BytesIO(content))
-            except Exception:
+                df = pd.read_excel(io.BytesIO(content), engine='openpyxl')
+            except Exception as e1:
+                read_errors.append(f"openpyxl: {e1}")
                 try:
-                    df = pd.read_csv(io.BytesIO(content))
-                except Exception:
-                    raise HTTPException(400, "Format file tidak dapat dibaca. Pastikan berkas berformat Excel (.xlsx/.xls) atau CSV (.csv).")
+                    df = pd.read_excel(io.BytesIO(content))
+                except Exception as e2:
+                    read_errors.append(f"read_excel_default: {e2}")
+
+        if df is None or not isinstance(df, pd.DataFrame):
+            try:
+                df = pd.read_csv(io.BytesIO(content))
+            except Exception as e3:
+                read_errors.append(f"read_csv: {e3}")
+                raise HTTPException(400, f"Gagal membaca file {file.filename}. Detail: {'; '.join(read_errors)}")
+
+        if df.empty:
+            raise HTTPException(400, "Dataset kosong. Pastikan berkas memiliki minimal 1 baris data.")
 
         df.columns = [str(c).strip() for c in df.columns]
 
@@ -115,6 +120,7 @@ async def stepwise_upload(file: UploadFile = File(...), x_session_id: Optional[s
                 df[col] = df[col].astype(str)
 
         df = df.replace([np.inf, -np.inf], np.nan)
+
         sessions[x_session_id] = {
             "df": df, "filename": file.filename, "config": {"k": 3, "features": [], "ahp_weights": {}},
             "start_time": time.time(), "metrics": {}, "audit": {"execution_checklist": []},
