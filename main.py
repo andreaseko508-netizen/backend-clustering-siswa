@@ -91,33 +91,35 @@ async def stepwise_upload(file: UploadFile = File(...), x_session_id: Optional[s
 
         file_ext = file.filename.split('.')[-1].lower() if '.' in file.filename else ''
         df = None
-        read_errors = []
 
         if file_ext in ['xlsx', 'xls'] or file_ext == '':
             try:
                 df = pd.read_excel(io.BytesIO(content), engine='openpyxl')
-            except Exception as e1:
-                read_errors.append(f"openpyxl: {e1}")
+            except Exception:
                 try:
                     df = pd.read_excel(io.BytesIO(content))
-                except Exception as e2:
-                    read_errors.append(f"read_excel_default: {e2}")
+                except Exception:
+                    try:
+                        df = pd.read_csv(io.BytesIO(content))
+                    except Exception:
+                        pass
 
         if df is None or not isinstance(df, pd.DataFrame):
             try:
                 df = pd.read_csv(io.BytesIO(content))
-            except Exception as e3:
-                read_errors.append(f"read_csv: {e3}")
-                raise HTTPException(400, f"Gagal membaca file {file.filename}. Detail: {'; '.join(read_errors)}")
+            except Exception:
+                raise HTTPException(400, f"Gagal membaca file {file.filename}. Format tidak dapat diproses.")
 
         if df.empty:
             raise HTTPException(400, "Dataset kosong. Pastikan berkas memiliki minimal 1 baris data.")
 
-        df.columns = [str(c).strip() for c in df.columns]
-
-        for col in df.columns:
-            if pd.api.types.is_datetime64_any_dtype(df[col]):
-                df[col] = df[col].astype(str)
+        clean_cols = []
+        for c in df.columns:
+            c_str = str(c).strip() if c is not None else "Col"
+            if c_str.lower() in ['nan', 'none', '']:
+                c_str = "Unnamed"
+            clean_cols.append(c_str)
+        df.columns = clean_cols
 
         df = df.replace([np.inf, -np.inf], np.nan)
 
@@ -133,10 +135,9 @@ async def stepwise_upload(file: UploadFile = File(...), x_session_id: Optional[s
 
         try:
             sync_session_to_firebase(x_session_id)
-        except Exception as sync_e:
-            logger.warning(f"Firebase sync warning on upload: {sync_e}")
+        except Exception: pass
 
-        return {"status": "success", "session_id": x_session_id, "jumlah_data": len(df), "columns": list(df.columns)}
+        return {"status": "success", "session_id": x_session_id, "jumlah_data": len(df), "columns": [str(c) for c in df.columns]}
     except HTTPException as he:
         raise he
     except Exception as e:

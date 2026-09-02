@@ -121,8 +121,42 @@ def add_to_checklist(x_session_id: str, step_name: str):
         sessions[x_session_id]["audit"]["execution_checklist"] = checklist
         sync_session_to_firebase(x_session_id)
 
+def clean_df_for_json(df):
+    """
+    Converts DataFrame records to 100% JSON-safe Python list of dicts.
+    Replaces NaN, Inf, -Inf, NaT, and Timestamps with safe strings/None/0.
+    Prevents 'ValueError: Out of range float values are not JSON compliant: nan'!
+    """
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return []
+
+    df_clean = df.copy()
+    df_clean = df_clean.replace([np.inf, -np.inf], np.nan)
+
+    records = []
+    for _, row in df_clean.iterrows():
+        row_dict = {}
+        for col, val in row.items():
+            col_str = str(col).strip() if col is not None else "Col"
+            if pd.isna(val) or val is None or str(val).lower() in ['nan', 'none', 'nat']:
+                row_dict[col_str] = ""
+            elif isinstance(val, (pd.Timestamp, pd.Timedelta)):
+                row_dict[col_str] = str(val)
+            elif isinstance(val, (float, np.floating)):
+                if np.isnan(val) or np.isinf(val):
+                    row_dict[col_str] = ""
+                else:
+                    row_dict[col_str] = float(val)
+            elif isinstance(val, (int, np.integer)):
+                row_dict[col_str] = int(val)
+            else:
+                row_dict[col_str] = str(val)
+        records.append(row_dict)
+
+    return records
+
 def get_representative_data(df):
     """Returns a visual preview for UI efficiency."""
-    if df is None or df.empty: return []
-    if len(df) <= 5: return df.to_dict(orient="records")
-    return pd.concat([df.head(3), df.tail(2)]).to_dict(orient="records")
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty: return []
+    if len(df) <= 5: return clean_df_for_json(df)
+    return clean_df_for_json(pd.concat([df.head(3), df.tail(2)]))
