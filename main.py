@@ -109,14 +109,27 @@ async def stepwise_upload(file: UploadFile = File(...), x_session_id: Optional[s
                     raise HTTPException(400, "Format file tidak dapat dibaca. Pastikan berkas berformat Excel (.xlsx/.xls) atau CSV (.csv).")
 
         df.columns = [str(c).strip() for c in df.columns]
+
+        for col in df.columns:
+            if pd.api.types.is_datetime64_any_dtype(df[col]):
+                df[col] = df[col].astype(str)
+
         df = df.replace([np.inf, -np.inf], np.nan)
         sessions[x_session_id] = {
             "df": df, "filename": file.filename, "config": {"k": 3, "features": [], "ahp_weights": {}},
             "start_time": time.time(), "metrics": {}, "audit": {"execution_checklist": []},
             "algo_state": {"iteration": 0, "history": []}
         }
-        ensure_audit(x_session_id); audit_checkpoints[x_session_id]["01_Data_Asli"] = df.copy()
-        sync_session_to_firebase(x_session_id)
+        ensure_audit(x_session_id)
+        try:
+            audit_checkpoints[x_session_id]["01_Data_Asli"] = df.copy()
+        except Exception: pass
+
+        try:
+            sync_session_to_firebase(x_session_id)
+        except Exception as sync_e:
+            logger.warning(f"Firebase sync warning on upload: {sync_e}")
+
         return {"status": "success", "session_id": x_session_id, "jumlah_data": len(df), "columns": list(df.columns)}
     except HTTPException as he:
         raise he

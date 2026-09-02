@@ -54,25 +54,29 @@ def sync_session_to_firebase(session_id: str):
     """Backs up the current session state to Firestore for serverless persistence."""
     if not db or session_id not in sessions: return
     try:
-        # Create a clean copy for serialization
-        session = sessions[session_id].copy()
+        raw_session = sessions[session_id]
+        session = {}
+        for k, v in raw_session.items():
+            if k in ["df", "unscaled_df"]:
+                continue
+            if k == "scaler":
+                if v is not None:
+                    try:
+                        session["scaler_b64"] = base64.b64encode(pickle.dumps(v)).decode('utf-8')
+                    except Exception: pass
+                continue
+            session[k] = v
 
-        # 1. Serialize Scaler
-        if "scaler" in session and session["scaler"] is not None:
-            try:
-                session["scaler_b64"] = base64.b64encode(pickle.dumps(session["scaler"])).decode('utf-8')
-                del session["scaler"]
-            except: pass
-
-        # 2. Serialize DataFrame
-        if "df" in session and isinstance(session["df"], pd.DataFrame):
-            df = session["df"]
+        if "df" in raw_session and isinstance(raw_session["df"], pd.DataFrame):
+            df = raw_session["df"]
             session["df_columns"] = [str(c) for c in df.columns]
-            df_safe = df.replace([np.inf, -np.inf], np.nan).fillna(0)
+            df_safe = df.copy()
+            for col in df_safe.columns:
+                if pd.api.types.is_datetime64_any_dtype(df_safe[col]):
+                    df_safe[col] = df_safe[col].astype(str)
+            df_safe = df_safe.replace([np.inf, -np.inf], np.nan).fillna(0)
             session["df_records"] = df_safe.to_dict(orient="records")
-            del session["df"]
 
-        # 3. Write to Firestore (Non-blocking as possible)
         db.collection("python_sessions").document(session_id).set(session)
     except Exception as e:
         print(f"Sync fail for {session_id}: {e}")
