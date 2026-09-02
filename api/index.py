@@ -604,24 +604,73 @@ async def update_centroids_step(x_session_id: Optional[str] = Header(None)):
     state["history"].append({"iter": state["iteration"], "movement": move, "wcss": safe_float(np.sum(np.min(np.linalg.norm(X[:, np.newaxis] - np.array(new_c), axis=2), axis=1)**2))})
     return {"status": "success", "new_centroids": new_c, "iteration": state["iteration"], "movement": move}
 
+@app.post("/stepwise/check-convergence/")
+@app.post("/stepwise/check-convergence")
 @app.post("/stepwise/auto-converge/")
 @app.post("/stepwise/auto-converge")
 async def auto_converge(x_session_id: Optional[str] = Header(None)):
-    session = await get_valid_session(x_session_id); state = session["algo_state"]; ahp, k, feats = session["config"].get("ahp_weights"), state["k"], state["features"]; X = get_weighted_x(session["df"][feats].fillna(0).values, ahp, feats)
-    history = []; centroids = np.array(state["centroids"])
+    session = await get_valid_session(x_session_id)
+    state = session.get("algo_state", {})
+
+    # Fallback default parameters if state is not initialized
+    feats = state.get("features", session["config"].get("features", list(session["df"].select_dtypes(include=['number']).columns)))
+    protected_cols = set([session["config"].get("identity", ""), session["config"].get("label", "")] + (session["config"].get("ignored", []) if isinstance(session["config"].get("ignored", []), list) else []))
+    feats = [f for f in feats if f in session["df"].columns and f not in protected_cols]
+
+    k = state.get("k", session["config"].get("k", 3))
+    ahp = session["config"].get("ahp_weights")
+
+    X = get_weighted_x(session["df"][feats].fillna(0).values, ahp, feats)
+
+    centroids = np.array(state.get("centroids", X[:k]))
+    if len(centroids) != k:
+        centroids = X[:k]
+
+    history = []
+    assignments = np.zeros(len(X), dtype=int)
+
     for i in range(1, 101):
-        dists = np.linalg.norm(X[:, np.newaxis] - centroids, axis=2); assignments = np.argmin(dists, axis=1)
-        wcss = safe_float(np.sum(np.min(dists, axis=1)**2)); new_c = np.array([X[assignments == j].mean(axis=0) if len(X[assignments == j]) > 0 else centroids[j] for j in range(k)])
-        move = safe_float(np.linalg.norm(new_c - centroids)); history.append({"iter": i, "movement": move, "wcss": wcss}); centroids = new_c
-        if move < 1e-4: break
+        dists = np.linalg.norm(X[:, np.newaxis] - centroids, axis=2)
+        assignments = np.argmin(dists, axis=1)
+        wcss = safe_float(np.sum(np.min(dists, axis=1)**2))
+        new_c = np.array([X[assignments == j].mean(axis=0) if len(X[assignments == j]) > 0 else centroids[j] for j in range(k)])
+        move = safe_float(np.linalg.norm(new_c - centroids))
+        history.append({"iter": i, "movement": move, "wcss": wcss})
+        centroids = new_c
+        if move < 1e-4:
+            break
+
     new_labels, remap = reorder_clusters_by_quality(session["df"], feats, assignments, k)
     final_centroids = [centroids[old_id].tolist() for old_id, _ in sorted(remap.items(), key=lambda x: x[1])]
+
     session["df"]["cluster"] = new_labels.tolist()
-    for j in range(k): session["df"][f"dist_c{j}"] = np.linalg.norm(X - np.array(final_centroids[j]), axis=1)
+    for j in range(k):
+        session["df"][f"dist_c{j}"] = np.linalg.norm(X - np.array(final_centroids[j]), axis=1)
+
     eval_k = calculate_cluster_metrics(session["df"], feats, new_labels, k, ahp)
-    session.update({"metrics": eval_k, "algo_state": {**state, "centroids": final_centroids, "assignments": new_labels.tolist(), "is_converged": True, "history": history, "iteration": len(history)}})
-    add_to_checklist(x_session_id, "Riset Selesai"); sync_session_to_firebase(x_session_id)
-    return {"status": "success", "is_converged": True, "iterations": len(history), "evaluation": eval_k, "hasil_cluster": session["df"].fillna(0).to_dict(orient="records")}
+
+    session.update({
+        "metrics": eval_k,
+        "algo_state": {
+            **state,
+            "centroids": final_centroids,
+            "assignments": new_labels.tolist(),
+            "is_converged": True,
+            "history": history,
+            "iteration": len(history)
+        }
+    })
+
+    add_to_checklist(x_session_id, "Riset Selesai")
+    sync_session_to_firebase(x_session_id)
+    return {
+        "status": "success",
+        "is_converged": True,
+        "iteration": len(history),
+        "history": history,
+        "evaluation": eval_k,
+        "hasil_cluster": session["df"].fillna(0).to_dict(orient="records")
+    }
 
 # --- 6. FCM CORE ---
 
