@@ -11,4 +11,5 @@ artifacts/
 temp/
 *.xlsx
 *.txt
+!requirements.txt
 .DS_Store

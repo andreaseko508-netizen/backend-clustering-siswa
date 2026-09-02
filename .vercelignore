@@ -6,6 +6,7 @@ temp
 *.xlsx
 *.csv
 *.txt
+!requirements.txt
 .DS_Store
 .idea
 .gradle
