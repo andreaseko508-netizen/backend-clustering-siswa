@@ -607,9 +607,11 @@ async def update_centroids_step(x_session_id: Optional[str] = Header(None)):
 
 @app.post("/stepwise/check-convergence/")
 @app.post("/stepwise/check-convergence")
-@app.post("/stepwise/auto-converge/")
-@app.post("/stepwise/auto-converge")
-async def auto_converge(x_session_id: Optional[str] = Header(None)):
+async def check_convergence_step(x_session_id: Optional[str] = Header(None)):
+    """
+    Step 20 - Phase 1: Single Step Convergence Check.
+    Executes ONLY 1 K-Means iteration to show initial movement delta.
+    """
     session = await get_valid_session(x_session_id)
     state = session.get("algo_state", {})
 
@@ -624,7 +626,71 @@ async def auto_converge(x_session_id: Optional[str] = Header(None)):
 
     X = get_weighted_x(session["df"][feats].fillna(0).values, ahp, feats)
 
-    # ALWAYS start convergence path from initial seeds (init_centroids) if present
+    init_c = state.get("init_centroids")
+    if init_c and len(init_c) == k:
+        centroids = np.array(init_c)
+    else:
+        centroids = np.array(state.get("centroids", X[:k]))
+        if len(centroids) != k:
+            centroids = X[:k]
+
+    # Execute SINGLE iteration (#1) to allow user to see movement first
+    dists = np.linalg.norm(X[:, np.newaxis] - centroids, axis=2)
+    assignments = np.argmin(dists, axis=1)
+    wcss = safe_float(np.sum(np.min(dists, axis=1)**2))
+
+    new_c = np.array([X[assignments == j].mean(axis=0) if len(X[assignments == j]) > 0 else centroids[j] for j in range(k)])
+    move = safe_float(np.linalg.norm(new_c - centroids))
+
+    history = [{
+        "iter": 1,
+        "movement": move,
+        "wcss": wcss,
+        "status": "Bergerak" if move >= 1e-4 else "STABIL"
+    }]
+
+    session["algo_state"] = {
+        **state,
+        "centroids": new_c.tolist(),
+        "assignments": assignments.tolist(),
+        "is_converged": False,
+        "history": history,
+        "iteration": 1
+    }
+
+    add_to_checklist(x_session_id, "Uji Konvergensi (Iterasi #1)")
+    sync_session_to_firebase(x_session_id)
+    return {
+        "status": "success",
+        "is_converged": False,
+        "iteration": 1,
+        "movement": move,
+        "history": history,
+        "message": f"Iterasi #1 selesai. Pusat klaster masih bergerak (Movement: {move:.4f}). Silakan klik 'Jalankan Auto-Konvergensi' untuk mengulang hingga stabil."
+    }
+
+
+@app.post("/stepwise/auto-converge/")
+@app.post("/stepwise/auto-converge")
+async def auto_converge(x_session_id: Optional[str] = Header(None)):
+    """
+    Step 20 - Phase 2: Complete Auto Convergence Path.
+    Executes iterative K-Means from init_centroids until delta < 1e-4.
+    """
+    session = await get_valid_session(x_session_id)
+    state = session.get("algo_state", {})
+
+    config = session.get("config", {})
+    feats = state.get("features", config.get("features", list(session["df"].select_dtypes(include=['number']).columns)))
+    config_ignored = config.get("ignored", [])
+    protected_cols = set([config.get("identity", ""), config.get("label", "")] + (config_ignored if isinstance(config_ignored, list) else []))
+    feats = [f for f in feats if f in session["df"].columns and f not in protected_cols]
+
+    k = state.get("k", config.get("k", 3))
+    ahp = config.get("ahp_weights")
+
+    X = get_weighted_x(session["df"][feats].fillna(0).values, ahp, feats)
+
     init_c = state.get("init_centroids")
     if init_c and len(init_c) == k:
         centroids = np.array(init_c)
@@ -644,17 +710,19 @@ async def auto_converge(x_session_id: Optional[str] = Header(None)):
         new_c = np.array([X[assignments == j].mean(axis=0) if len(X[assignments == j]) > 0 else centroids[j] for j in range(k)])
         move = safe_float(np.linalg.norm(new_c - centroids))
 
+        is_stbl = move < 1e-4 or i == 100
         history.append({
             "iter": i,
             "movement": move,
-            "wcss": wcss
+            "wcss": wcss,
+            "status": "STABIL" if is_stbl else "Bergerak"
         })
 
         centroids = new_c
-        if move < 1e-4 and i >= 2:
+        if is_stbl and i >= 2:
             break
 
-    # Rank-Based Reordering (C1, C2, C3)
+    # Rank-Based Reordering (C1: Berprestasi, C2: Performa Stabil, C3: Butuh Bantuan)
     new_labels, remap = reorder_clusters_by_quality(session["df"], feats, assignments, k)
     final_centroids = [centroids[old_id].tolist() for old_id, _ in sorted(remap.items(), key=lambda x: x[1])]
 
