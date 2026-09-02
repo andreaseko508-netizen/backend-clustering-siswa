@@ -127,10 +127,6 @@ def run_real_ga_init(X, k, population_size=30, generations=25):
     best_idx = np.argmax(fitness)
     return population[best_idx]
 
-    fitness = calculate_fitness_batch(population)
-    best_idx = np.argmax(fitness)
-    return population[best_idx]
-
 def perform_normality_test_expert(df, features):
     """S2 Standard: Detailed Normality & Skewness Audit."""
     results = []
