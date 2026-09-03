@@ -1,8 +1,15 @@
+import os
+import sys
+import tempfile
+
+# Serverless environment (Vercel / AWS Lambda) fix for Matplotlib
+os.environ['MPLCONFIGDIR'] = os.path.join(tempfile.gettempdir(), 'matplotlib_config')
+import matplotlib
+matplotlib.use('Agg')
+
 from fastapi import FastAPI, HTTPException, UploadFile, File, Header, Body, Query
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-import os
-import sys
 import pandas as pd
 import numpy as np
 import time

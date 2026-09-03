@@ -2,9 +2,15 @@ import io
 import uuid
 import tempfile
 import os
-import numpy as np
+
+# Serverless environment (Vercel / AWS Lambda) fix for Matplotlib
+os.environ['MPLCONFIGDIR'] = os.path.join(tempfile.gettempdir(), 'matplotlib_config')
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import seaborn as sns
+
+import numpy as np
 from fpdf import FPDF
 
 class ResearchReportPDF(FPDF):
