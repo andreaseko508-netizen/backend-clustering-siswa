@@ -96,10 +96,6 @@ def calculate_cluster_metrics(df, features, assignments, k, weights_dict=None):
             "dbi_interpretation": "GOOD / OPTIMAL",
             "silhouette_score": 0.580
         }
-            "timestamp": time.time()
-        }
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
 
 def run_real_ga_init(X, k, population_size=30, generations=25):
     """
