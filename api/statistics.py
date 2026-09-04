@@ -344,7 +344,7 @@ def calculate_aid_score_and_recommendations(df, features, ahp_weights):
         x9_code = np.array([get_code(v, ord_internet) for v in x9_raw])
 
         # 1. Option B Tiered Income Scoring (s_2)
-        s_2 = np.where(inc <= 1500000, 1.00, np.where(inc <= 3500000, 0.50, 0.00))
+        s_2 = np.where(inc <= 1500000, 1.00, np.where(inc <= 4000000, 0.50, 0.00))
 
         # 2. X5 Dependents Min-Max [1..11] (s_5)
         s_5 = np.clip((x5 - 1.0) / (11.0 - 1.0), 0.0, 1.0)
@@ -374,10 +374,10 @@ def calculate_aid_score_and_recommendations(df, features, ahp_weights):
 
         df["aid_score"] = np.round(aid_scores, 4).tolist()
 
-        # Option C Absolute Domain Thresholds
+        # Approved Final Domain Thresholds (>= 0.70 Sangat Layak, >= 0.40 Layak, < 0.40 Tidak Prioritas)
         labels_bantuan = []
         for sc in aid_scores:
-            if sc >= 0.60:
+            if sc >= 0.70:
                 labels_bantuan.append("Sangat Layak")
             elif sc >= 0.40:
                 labels_bantuan.append("Layak")
