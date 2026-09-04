@@ -159,12 +159,15 @@ async def get_raw_data(x_session_id: Optional[str] = Header(None)):
 
 @app.post("/stepwise/mapping-config/")
 @app.post("/stepwise/mapping-config")
-async def stepwise_mapping(x_session_id: Optional[str] = Header(None), config: Dict[str, Any] = Body(...)):
-    session = await get_valid_session(x_session_id); session["config"].update(config)
+async def stepwise_mapping(x_session_id: Optional[str] = Header(None), x_analysis_mode: Optional[str] = Header(None), config: Dict[str, Any] = Body(...)):
+    session = await get_valid_session(x_session_id)
+    session["config"].update(config)
+    mode = x_analysis_mode or config.get("analysis_mode", session["config"].get("analysis_mode", "thesis"))
+    session["config"]["analysis_mode"] = str(mode).lower()
     ensure_audit(x_session_id)
     if "features" in config: audit_checkpoints[x_session_id]["02_Seleksi_Variabel"] = session["df"][config["features"]].copy()
     add_to_checklist(x_session_id, "Seleksi Variabel"); sync_session_to_firebase(x_session_id)
-    return {"status": "success"}
+    return {"status": "success", "analysis_mode": session["config"]["analysis_mode"]}
 
 @app.post("/stepwise/select-features/")
 @app.post("/stepwise/select-features")
@@ -174,10 +177,13 @@ async def stepwise_select_features(x_session_id: Optional[str] = Header(None), c
 
 @app.post("/stepwise/save_config/")
 @app.post("/stepwise/save_config")
-async def stepwise_save_config(x_session_id: Optional[str] = Header(None), config: Dict[str, Any] = Body(...)):
-    session = await get_valid_session(x_session_id); session["config"].update(config)
+async def stepwise_save_config(x_session_id: Optional[str] = Header(None), x_analysis_mode: Optional[str] = Header(None), config: Dict[str, Any] = Body(...)):
+    session = await get_valid_session(x_session_id)
+    session["config"].update(config)
+    mode = x_analysis_mode or config.get("analysis_mode", session["config"].get("analysis_mode", "thesis"))
+    session["config"]["analysis_mode"] = str(mode).lower()
     add_to_checklist(x_session_id, "Konfigurasi Algoritma"); sync_session_to_firebase(x_session_id)
-    return {"status": "success"}
+    return {"status": "success", "analysis_mode": session["config"]["analysis_mode"]}
 
 @app.get("/stepwise/session-state/")
 @app.get("/stepwise/session-state")
@@ -529,9 +535,12 @@ async def stepwise_compare_k(x_session_id: Optional[str] = Header(None)):
 
 @app.post("/stepwise/init-centroids/")
 @app.post("/stepwise/init-centroids")
-async def init_centroids_step(x_session_id: Optional[str] = Header(None), params: Dict[str, Any] = Body({"k": 3})):
+async def init_centroids_step(x_session_id: Optional[str] = Header(None), x_analysis_mode: Optional[str] = Header(None), params: Dict[str, Any] = Body({"k": 3})):
     session = await get_valid_session(x_session_id)
     config = session.get("config", {})
+
+    mode = x_analysis_mode or config.get("analysis_mode", "thesis")
+    config["analysis_mode"] = str(mode).lower()
 
     feats = config.get("features", list(session["df"].select_dtypes(include=['number']).columns))
     protected_cols = set([config.get("identity", ""), config.get("label", "")] + (config.get("ignored", []) if isinstance(config.get("ignored", []), list) else []))
@@ -539,6 +548,11 @@ async def init_centroids_step(x_session_id: Optional[str] = Header(None), params
 
     k = params.get("k", 3)
     method = str(params.get("init_method", params.get("strategy", "systematic"))).lower()
+
+    if config["analysis_mode"] == "baseline":
+        method = "systematic"
+    elif "ga" not in method and "hybrid" not in method and method != "systematic":
+        method = "hybrid_ga"
 
     X = get_weighted_x(session["df"][feats].fillna(0).values, config.get("ahp_weights"), feats)
 
@@ -580,7 +594,8 @@ async def init_centroids_step(x_session_id: Optional[str] = Header(None), params
         "centroids": centroids_list,
         "features": feats,
         "message": msg,
-        "init_type": init_type
+        "init_type": init_type,
+        "analysis_mode": config["analysis_mode"]
     }
 
 @app.post("/stepwise/calculate-distances/")
@@ -787,9 +802,40 @@ async def auto_converge(x_session_id: Optional[str] = Header(None)):
 @app.post("/stepwise/fcm-init/")
 @app.post("/stepwise/fcm-init")
 async def fcm_init_step(x_session_id: Optional[str] = Header(None), params: Dict[str, Any] = Body({"k": 3, "m": 2.0})):
-    session = await get_valid_session(x_session_id); k, m = params.get("k", 3), params.get("m", 2.0); feats = session["config"].get("features", list(session["df"].columns)); X = get_weighted_x(session["df"][feats].fillna(0).values, session["config"].get("ahp_weights"), feats)
-    U = np.random.dirichlet(np.ones(k), size=len(X)).T; session["algo_state"] = {"mode": "fcm", "iteration": 0, "U": U.tolist(), "X": X.tolist(), "features": feats, "k": k, "m": m, "history": []}
-    add_to_checklist(x_session_id, "Inisialisasi FCM"); return {"status": "success"}
+    session = await get_valid_session(x_session_id)
+    k, m = params.get("k", 3), params.get("m", 2.0)
+    feats = session["config"].get("features", list(session["df"].select_dtypes(include=['number']).columns))
+    protected_cols = set([session["config"].get("identity", ""), session["config"].get("label", "")] + (session["config"].get("ignored", []) if isinstance(session["config"].get("ignored", []), list) else []))
+    feats = [f for f in feats if f in session["df"].columns and f not in protected_cols]
+
+    X = get_weighted_x(session["df"][feats].fillna(0).values, session["config"].get("ahp_weights"), feats)
+
+    state = session.get("algo_state", {})
+    if "centroids" in state and len(state["centroids"]) == k:
+        centers = np.array(state["centroids"])
+        dists = np.fmax(np.linalg.norm(X[:, np.newaxis] - centers, axis=2), 1e-10)
+        power = -2.0 / (m - 1)
+        dists_p = dists ** power
+        U = (dists_p / dists_p.sum(axis=1, keepdims=True)).T
+        init_type = "K-Means Final Centroids"
+    else:
+        U = np.random.dirichlet(np.ones(k), size=len(X)).T
+        init_type = "Random Dirichlet"
+
+    session["algo_state"] = {
+        "mode": "fcm",
+        "iteration": 0,
+        "U": U.tolist(),
+        "X": X.tolist(),
+        "features": feats,
+        "k": k,
+        "m": m,
+        "history": [],
+        "init_type": init_type
+    }
+    add_to_checklist(x_session_id, f"Inisialisasi FCM ({init_type})")
+    sync_session_to_firebase(x_session_id)
+    return {"status": "success", "init_type": init_type, "k": k, "m": m}
 
 @app.post("/stepwise/fcm-iteration/")
 @app.post("/stepwise/fcm-iteration")
