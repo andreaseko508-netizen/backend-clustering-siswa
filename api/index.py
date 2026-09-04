@@ -58,6 +58,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/")
+@app.get("/health")
+async def health_check():
+    return {"status": "ok", "app": "SIMORBATAS AI Runtime", "version": "22.0.0"}
+
 async def get_valid_session(x_session_id: str):
     await ensure_session(x_session_id)
     if x_session_id not in sessions:
