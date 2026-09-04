@@ -143,6 +143,10 @@ def run_real_ga_init(X, k, population_size=30, generations=25):
         noise = np.random.normal(0, 0.05, size=population.shape)
         population = population + mutation_mask * noise
 
+        # Domain Constraint: Clip population to non-negative feature bounds [0, X_max]
+        max_bounds = np.max(X, axis=0)
+        population = np.clip(population, 0.0, max_bounds)
+
     fitness = calculate_fitness_batch(population)
     best_idx = np.argmax(fitness)
     return population[best_idx]
