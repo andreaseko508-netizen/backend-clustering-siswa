@@ -111,14 +111,10 @@ def run_real_ga_init(X, k, population_size=30, generations=25):
 
     def calculate_fitness_batch(pop_centroids):
         # pop_centroids: (P, K, F), X: (N, F)
-        # Calculate squared distance using expanded formula: ||x - c||^2 = ||x||^2 + ||c||^2 - 2 x.c^T
-        pop_sq = np.sum(pop_centroids**2, axis=2) # (P, K)
-        dot_product = np.matmul(pop_centroids, X.T) # (P, K, N)
-
-        # dist_sq: (P, N, K)
-        dist_sq = np.maximum(X_sq.T[np.newaxis, :, :] + pop_sq[:, np.newaxis, :] - 2 * np.swapaxes(dot_product, 1, 2), 0)
-        min_dists = np.min(dist_sq, axis=2) # (P, N)
-        wcss = np.sum(min_dists, axis=1) # (P,)
+        diffs = X[np.newaxis, :, np.newaxis, :] - pop_centroids[:, np.newaxis, :, :] # (P, N, K, F)
+        dists_sq = np.sum(diffs ** 2, axis=3) # (P, N, K)
+        min_dists = np.min(dists_sq, axis=2)  # (P, N)
+        wcss = np.sum(min_dists, axis=1)      # (P,)
         return 1.0 / (wcss + 1e-10)
 
     # Initialize random population: (P, K, F)

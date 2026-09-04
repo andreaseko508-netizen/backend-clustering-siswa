@@ -805,6 +805,11 @@ async def auto_converge(x_session_id: Optional[str] = Header(None)):
             if old_id < len(U) and new_id < len(U):
                 remapped_U[new_id] = U[old_id]
 
+        fcm_labels = np.argmax(remapped_U, axis=0)
+        session["df"]["kmeans_cluster"] = new_labels.tolist()
+        session["df"]["fcm_cluster"] = fcm_labels.tolist()
+        session["df"]["cluster"] = fcm_labels.tolist() # Thesis Mode final academic category comes from FCM argmax
+
         for j in range(k):
             session["df"][f"membership_c{j+1}"] = np.round(remapped_U[j], 4).tolist()
 
@@ -816,7 +821,17 @@ async def auto_converge(x_session_id: Optional[str] = Header(None)):
             "xie_beni_index": xb_val,
             "partition_entropy": pe_val,
             "fcm_centers": centers.tolist(),
-            "fcm_history": fcm_history
+            "fcm_history": fcm_history,
+            "fcm_counts": {
+                "C1_Berprestasi": int(np.sum(fcm_labels == 0)),
+                "C2_Berkembang": int(np.sum(fcm_labels == 1)),
+                "C3_Perlu_Pembinaan": int(np.sum(fcm_labels == 2))
+            },
+            "kmeans_counts": {
+                "C1_Berprestasi": int(np.sum(new_labels == 0)),
+                "C2_Berkembang": int(np.sum(new_labels == 1)),
+                "C3_Perlu_Pembinaan": int(np.sum(new_labels == 2))
+            }
         })
 
     session.update({
