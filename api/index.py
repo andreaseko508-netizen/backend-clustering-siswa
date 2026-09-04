@@ -648,11 +648,61 @@ async def assign_clusters_step(x_session_id: Optional[str] = Header(None)):
 @app.post("/stepwise/update-centroids/")
 @app.post("/stepwise/update-centroids")
 async def update_centroids_step(x_session_id: Optional[str] = Header(None)):
-    session = await get_valid_session(x_session_id); state = session["algo_state"]; X = get_weighted_x(session["df"][state["features"]].fillna(0).values, session["config"].get("ahp_weights"), state["features"])
-    assign = np.array(state["assignments"]); new_c = [X[assign == i].mean(axis=0).tolist() if len(X[assign == i]) > 0 else state["centroids"][i] for i in range(state["k"])]
-    move = safe_float(np.linalg.norm(np.array(new_c) - np.array(state["centroids"]))); state["centroids"], state["iteration"] = new_c, state["iteration"] + 1
-    state["history"].append({"iter": state["iteration"], "movement": move, "wcss": safe_float(np.sum(np.min(np.linalg.norm(X[:, np.newaxis] - np.array(new_c), axis=2), axis=1)**2))})
-    return {"status": "success", "new_centroids": new_c, "iteration": state["iteration"], "movement": move}
+    try:
+        session = await get_valid_session(x_session_id)
+        state = session.get("algo_state", {})
+        config = session.get("config", {})
+
+        feats = state.get("features", config.get("features", list(session["df"].select_dtypes(include=['number']).columns)))
+        config_ignored = config.get("ignored", [])
+        protected_cols = set([config.get("identity", ""), config.get("label", "")] + (config_ignored if isinstance(config_ignored, list) else []))
+        feats = [f for f in feats if f in session["df"].columns and f not in protected_cols]
+
+        k = state.get("k", config.get("k", 3))
+        ahp = config.get("ahp_weights")
+
+        X = get_weighted_x(session["df"][feats].fillna(0).values, ahp, feats)
+
+        init_c = state.get("init_centroids")
+        if "centroids" in state and len(state["centroids"]) == k:
+            centroids = np.array(state["centroids"])
+        elif init_c and len(init_c) == k:
+            centroids = np.array(init_c)
+        else:
+            centroids = X[:k]
+
+        if "assignments" in state and len(state["assignments"]) == len(X):
+            assign = np.array(state["assignments"])
+        else:
+            dists = np.linalg.norm(X[:, np.newaxis] - centroids, axis=2)
+            assign = np.argmin(dists, axis=1)
+            state["assignments"] = assign.tolist()
+
+        new_c = np.array([X[assign == i].mean(axis=0) if len(X[assign == i]) > 0 else centroids[i] for i in range(k)])
+        move = safe_float(np.linalg.norm(new_c - centroids))
+
+        curr_iter = state.get("iteration", 0) + 1
+        state["centroids"] = new_c.tolist()
+        state["iteration"] = curr_iter
+
+        wcss = safe_float(np.sum(np.min(np.linalg.norm(X[:, np.newaxis] - new_c, axis=2), axis=1)**2))
+        history = state.get("history", [])
+        history.append({"iter": curr_iter, "movement": move, "wcss": wcss})
+        state["history"] = history
+
+        add_to_checklist(x_session_id, f"Pembaruan Centroid Iterasi #{curr_iter}")
+        sync_session_to_firebase(x_session_id)
+
+        return {
+            "status": "success",
+            "new_centroids": new_c.tolist(),
+            "iteration": curr_iter,
+            "movement": move,
+            "wcss": wcss
+        }
+    except Exception as e:
+        logger.error(f"Error in update_centroids_step: {e}")
+        raise HTTPException(500, f"Gagal memperbarui centroid: {str(e)}")
 
 @app.post("/stepwise/check-convergence/")
 @app.post("/stepwise/check-convergence")
