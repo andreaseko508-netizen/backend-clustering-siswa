@@ -389,17 +389,17 @@ def calculate_aid_score_and_recommendations(df, features, ahp_weights):
 
         # Matrix Rule Engine 3x3 Mapping
         rules_matrix = {
-            (0, "Sangat Layak"): ("Rule R11", "Beasiswa Prestasi Penuh + Bantuan Operasional Pendidikan Utama (KIP)", "Siswa memilik performa akademis unggul (C1 Berprestasi) dan tingkat kerentanan sosial-ekonomi/aksesibilitas sangat tinggi."),
-            (0, "Layak"): ("Rule R12", "Beasiswa Penguatan Akademik + Fasilitas Pengembangan Bakat/Olimpiade", "Siswa memiliki performa akademis unggul (C1 Berprestasi) dengan kondisi ekonomi sedang yang memerlukan dorongan kompetensi."),
-            (0, "Tidak Prioritas"): ("Rule R13", "Delegasi Kompetisi Sains/Olimpiade + Pengayaan Kepemimpinan", "Siswa memiliki performa akademis unggul (C1 Berprestasi) dengan kondisi ekonomi mandiri, siap menjadi perwakilan sekolah."),
+            (0, "Sangat Layak"): ("Rule R11", "Beasiswa Prestasi + Bantuan Pendidikan", "Siswa memiliki performa akademis unggul (C1 Berprestasi) dan tingkat kebutuhan bantuan sosial-ekonomi/aksesibilitas sangat tinggi."),
+            (0, "Layak"): ("Rule R12", "Program Pengembangan Prestasi", "Siswa memiliki performa akademis unggul (C1 Berprestasi) dengan tingkat kebutuhan bantuan sedang."),
+            (0, "Tidak Prioritas"): ("Rule R13", "Program Pengayaan Prestasi / Olimpiade", "Siswa memiliki performa akademis unggul (C1 Berprestasi) dengan tingkat kebutuhan bantuan rendah."),
 
-            (1, "Sangat Layak"): ("Rule R21", "Bantuan Operasional Pendidikan (KIP) + Pendampingan Belajar Komunitas", "Siswa memiliki performa akademis berkembang (C2 Berkembang) dengan tingkat kebutuhan bantuan ekonomi sangat tinggi."),
-            (1, "Layak"): ("Rule R22", "Program Pendampingan Belajar Terarah + Akses Perpustakaan Digital", "Siswa memiliki performa akademis stabil (C2 Berkembang) dengan tingkat kebutuhan bantuan sedang."),
-            (1, "Tidak Prioritas"): ("Rule R23", "Monitoring Performa Akademik + Pembinaan Ekstrakurikuler Mandiri", "Siswa memiliki performa akademis stabil (C2 Berkembang) dengan kondisi ekonomi mandiri."),
+            (1, "Sangat Layak"): ("Rule R21", "Bantuan Pendidikan + Pendampingan Akademik", "Siswa memiliki performa akademis berkembang (C2 Berkembang) dan tingkat kebutuhan bantuan sosial-ekonomi sangat tinggi."),
+            (1, "Layak"): ("Rule R22", "Pendampingan Akademik Terarah", "Siswa memiliki performa akademis berkembang (C2 Berkembang) dengan tingkat kebutuhan bantuan sedang."),
+            (1, "Tidak Prioritas"): ("Rule R23", "Monitoring Akademik", "Siswa memiliki performa akademis berkembang (C2 Berkembang) dengan tingkat kebutuhan bantuan rendah."),
 
-            (2, "Sangat Layak"): ("Rule R31", "Subsidi Bantuan Pendidikan Utama + Bimbingan Belajar Intensif Khusus", "Siswa membutuhkan pembinaan akademis khusus (C3 Perlu Pembinaan) dan bantuan operasional biaya pendidikan utama."),
-            (2, "Layak"): ("Rule R32", "Program Remedial Khusus + Pendampingan Konseling & Motivasi Belajar", "Siswa membutuhkan perbaikan akademis (C3 Perlu Pembinaan) dan motivasi pendampingan konseling sekolah."),
-            (2, "Tidak Prioritas"): ("Rule R33", "Konseling Pembinaan Akademik + Evaluasi Rutin Orang Tua / Wali", "Siswa membutuhkan pembinaan akademis khusus (C3 Perlu Pembinaan) dengan evaluasi berkala bersama orang tua/wali.")
+            (2, "Sangat Layak"): ("Rule R31", "Bantuan Pendidikan + Bimbingan Intensif", "Siswa membutuhkan pembinaan akademis khusus (C3 Perlu Pembinaan) dan bantuan operasional pendidikan utama."),
+            (2, "Layak"): ("Rule R32", "Bimbingan Intensif", "Siswa membutuhkan pembinaan akademis khusus (C3 Perlu Pembinaan) dengan tingkat kebutuhan bantuan sedang."),
+            (2, "Tidak Prioritas"): ("Rule R33", "Konseling dan Monitoring Akademik", "Siswa membutuhkan pembinaan akademis khusus (C3 Perlu Pembinaan) dengan tingkat kebutuhan bantuan rendah.")
         }
 
         clusters = df.get("cluster", np.zeros(n, dtype=int)).values
