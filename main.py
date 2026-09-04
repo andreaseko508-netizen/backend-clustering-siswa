@@ -774,6 +774,51 @@ async def auto_converge(x_session_id: Optional[str] = Header(None)):
 
     eval_k = calculate_cluster_metrics(session["df"], feats, new_labels, k, ahp)
 
+    # IF THESIS MODE: Run Iterative Fuzzy C-Means (FCM) using K-Means Final Centroids as V(0)
+    analysis_mode = config.get("analysis_mode", "thesis")
+    if analysis_mode == "thesis":
+        m = 2.0
+        centers = np.array(final_centroids)
+        dists = np.fmax(np.linalg.norm(X[:, np.newaxis] - centers, axis=2), 1e-10)
+        power = -2.0 / (m - 1)
+        dists_p = dists ** power
+        U = (dists_p / dists_p.sum(axis=1, keepdims=True)).T
+
+        fcm_history = []
+        for fcm_iter in range(1, 101):
+            new_centers = ((U**m) @ X) / ((U**m).sum(axis=1)[:, np.newaxis] + 1e-10)
+            dists = np.fmax(np.linalg.norm(X[:, np.newaxis] - new_centers, axis=2), 1e-10)
+            dists_p = dists ** power
+            new_U = (dists_p / dists_p.sum(axis=1, keepdims=True)).T
+
+            diff = safe_float(np.linalg.norm(new_U - U))
+            fcm_history.append({"iter": fcm_iter, "diff": diff})
+
+            U = new_U
+            centers = new_centers
+            if diff < 1e-4 and fcm_iter >= 2:
+                break
+
+        # Remap U to match reordered cluster IDs (C1, C2, C3)
+        remapped_U = np.zeros_like(U)
+        for old_id, new_id in remap.items():
+            if old_id < len(U) and new_id < len(U):
+                remapped_U[new_id] = U[old_id]
+
+        for j in range(k):
+            session["df"][f"membership_c{j+1}"] = np.round(remapped_U[j], 4).tolist()
+
+        xb_val = calculate_xie_beni(X, remapped_U, centers, m)
+        pe_val = calculate_partition_entropy(remapped_U)
+
+        eval_k.update({
+            "fcm_iterations": len(fcm_history),
+            "xie_beni_index": xb_val,
+            "partition_entropy": pe_val,
+            "fcm_centers": centers.tolist(),
+            "fcm_history": fcm_history
+        })
+
     session.update({
         "metrics": eval_k,
         "algo_state": {
