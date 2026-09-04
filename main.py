@@ -39,12 +39,13 @@ try:
     from statistics import (
         calculate_cluster_metrics, run_real_ga_init, get_weighted_x,
         perform_normality_test_expert, calculate_hopkins, calculate_ahp_weights_and_cr,
-        calculate_xie_beni, calculate_partition_entropy, perform_stability_audit, perform_sensitivity_audit
+        calculate_xie_beni, calculate_partition_entropy, perform_stability_audit, perform_sensitivity_audit,
+        calculate_aid_score_and_recommendations
     )
     from reports import ResearchReportPDF
 except ImportError:
     from api.utils import sessions, audit_checkpoints, db, ensure_session, ensure_audit, sync_session_to_firebase, add_to_checklist, get_representative_data, safe_float
-    from api.statistics import calculate_cluster_metrics, run_real_ga_init, get_weighted_x, perform_normality_test_expert, calculate_hopkins, calculate_ahp_weights_and_cr, calculate_xie_beni, calculate_partition_entropy, perform_stability_audit, perform_sensitivity_audit
+    from api.statistics import calculate_cluster_metrics, run_real_ga_init, get_weighted_x, perform_normality_test_expert, calculate_hopkins, calculate_ahp_weights_and_cr, calculate_xie_beni, calculate_partition_entropy, perform_stability_audit, perform_sensitivity_audit, calculate_aid_score_and_recommendations
     from api.reports import ResearchReportPDF
 
 app = FastAPI(title="SIMORBATAS Professional AI Runtime", version="22.0.0", redirect_slashes=False)
@@ -815,6 +816,9 @@ async def auto_converge(x_session_id: Optional[str] = Header(None)):
 
         xb_val = calculate_xie_beni(X, remapped_U, centers, m)
         pe_val = calculate_partition_entropy(remapped_U)
+
+        # Calculate Aid Score & 3x3 Matrix Rule Engine Recommendations
+        session["df"] = calculate_aid_score_and_recommendations(session["df"], feats, ahp)
 
         eval_k.update({
             "fcm_iterations": len(fcm_history),

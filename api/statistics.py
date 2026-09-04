@@ -307,3 +307,121 @@ def perform_sensitivity_audit(X_raw, features, weights_dict, k, labels):
         }
     except Exception as e:
         return {"status": "error", "message": str(e), "interpretation": str(e), "results": []}
+
+def calculate_aid_score_and_recommendations(df, features, ahp_weights):
+    """
+    Increment 4C: Approved Option B Tiered Income + Option C Absolute Domain Thresholds.
+    Evaluates individual student socio-economic vulnerability (X2, X5, X6, X7, X8, X9)
+    and maps Kategori Akademik x Kategori Bantuan -> Rule Matrix 3x3 Strategic Recommendations.
+    """
+    try:
+        n = len(df)
+        if n == 0:
+            return df
+
+        ord_kendaraan = {"jalan kaki": 0, "sepeda": 1, "motor": 2, "sepeda motor": 2, "mobil": 3, "angkutan umum": 4}
+        ord_internet = {"tidak": 0, "tidak ada": 0, "ya": 1, "ada": 1}
+
+        def get_code(val, r_map):
+            s_val = str(val).strip().lower() if pd.notnull(val) else ""
+            c_code = r_map.get(s_val)
+            if c_code is None:
+                c_code = 0
+                for k_sub, v_sub in r_map.items():
+                    if k_sub in s_val or s_val in k_sub:
+                        c_code = v_sub
+                        break
+            return c_code
+
+        inc = pd.to_numeric(df.get("Penghasilan Orang Tua", 0), errors="coerce").fillna(0).values
+        x5 = pd.to_numeric(df.get("Jumlah Tanggungan", 1), errors="coerce").fillna(1).values
+        x6 = pd.to_numeric(df.get("Jarak", 0.1), errors="coerce").fillna(0.1).values
+        x7 = pd.to_numeric(df.get("Lama Perjalanan", 2.0), errors="coerce").fillna(2.0).values
+        x8_raw = df.get("Kendaraan", "jalan kaki").values
+        x9_raw = df.get("Internet", "tidak").values
+
+        x8_code = np.array([get_code(v, ord_kendaraan) for v in x8_raw])
+        x9_code = np.array([get_code(v, ord_internet) for v in x9_raw])
+
+        # 1. Option B Tiered Income Scoring (s_2)
+        s_2 = np.where(inc <= 1500000, 1.00, np.where(inc <= 3500000, 0.50, 0.00))
+
+        # 2. X5 Dependents Min-Max [1..11] (s_5)
+        s_5 = np.clip((x5 - 1.0) / (11.0 - 1.0), 0.0, 1.0)
+
+        # 3. X6 Distance Min-Max [0.1..15.0 km] (s_6)
+        s_6 = np.clip((x6 - 0.1) / (15.0 - 0.1), 0.0, 1.0)
+
+        # 4. X7 Travel Time Min-Max [2.0..200.0 mnt] (s_7)
+        s_7 = np.clip((x7 - 2.0) / (200.0 - 2.0), 0.0, 1.0)
+
+        # 5. X8 Transport Priority Scoring (s_8)
+        trans_map = {0: 1.00, 1: 0.75, 4: 0.50, 2: 0.25, 3: 0.00}
+        s_8 = np.array([trans_map.get(c, 0.50) for c in x8_code])
+
+        # 6. X9 Internet Priority Scoring (s_9)
+        s_9 = 1.0 - x9_code
+
+        # Renormalized AHP Sub-Weights
+        aid_scores = (
+            0.500 * s_2 +
+            0.200 * s_5 +
+            0.100 * s_6 +
+            0.050 * s_7 +
+            0.100 * s_8 +
+            0.050 * s_9
+        )
+
+        df["aid_score"] = np.round(aid_scores, 4).tolist()
+
+        # Option C Absolute Domain Thresholds
+        labels_bantuan = []
+        for sc in aid_scores:
+            if sc >= 0.60:
+                labels_bantuan.append("Sangat Layak")
+            elif sc >= 0.40:
+                labels_bantuan.append("Layak")
+            else:
+                labels_bantuan.append("Tidak Prioritas")
+
+        df["bantuan"] = labels_bantuan
+        df["priority"] = labels_bantuan
+
+        # Matrix Rule Engine 3x3 Mapping
+        rules_matrix = {
+            (0, "Sangat Layak"): ("Rule R11", "Beasiswa Prestasi Penuh + Bantuan Operasional Pendidikan Utama (KIP)", "Siswa memilik performa akademis unggul (C1 Berprestasi) dan tingkat kerentanan sosial-ekonomi/aksesibilitas sangat tinggi."),
+            (0, "Layak"): ("Rule R12", "Beasiswa Penguatan Akademik + Fasilitas Pengembangan Bakat/Olimpiade", "Siswa memiliki performa akademis unggul (C1 Berprestasi) dengan kondisi ekonomi sedang yang memerlukan dorongan kompetensi."),
+            (0, "Tidak Prioritas"): ("Rule R13", "Delegasi Kompetisi Sains/Olimpiade + Pengayaan Kepemimpinan", "Siswa memiliki performa akademis unggul (C1 Berprestasi) dengan kondisi ekonomi mandiri, siap menjadi perwakilan sekolah."),
+
+            (1, "Sangat Layak"): ("Rule R21", "Bantuan Operasional Pendidikan (KIP) + Pendampingan Belajar Komunitas", "Siswa memiliki performa akademis berkembang (C2 Berkembang) dengan tingkat kebutuhan bantuan ekonomi sangat tinggi."),
+            (1, "Layak"): ("Rule R22", "Program Pendampingan Belajar Terarah + Akses Perpustakaan Digital", "Siswa memiliki performa akademis stabil (C2 Berkembang) dengan tingkat kebutuhan bantuan sedang."),
+            (1, "Tidak Prioritas"): ("Rule R23", "Monitoring Performa Akademik + Pembinaan Ekstrakurikuler Mandiri", "Siswa memiliki performa akademis stabil (C2 Berkembang) dengan kondisi ekonomi mandiri."),
+
+            (2, "Sangat Layak"): ("Rule R31", "Subsidi Bantuan Pendidikan Utama + Bimbingan Belajar Intensif Khusus", "Siswa membutuhkan pembinaan akademis khusus (C3 Perlu Pembinaan) dan bantuan operasional biaya pendidikan utama."),
+            (2, "Layak"): ("Rule R32", "Program Remedial Khusus + Pendampingan Konseling & Motivasi Belajar", "Siswa membutuhkan perbaikan akademis (C3 Perlu Pembinaan) dan motivasi pendampingan konseling sekolah."),
+            (2, "Tidak Prioritas"): ("Rule R33", "Konseling Pembinaan Akademik + Evaluasi Rutin Orang Tua / Wali", "Siswa membutuhkan pembinaan akademis khusus (C3 Perlu Pembinaan) dengan evaluasi berkala bersama orang tua/wali.")
+        }
+
+        clusters = df.get("cluster", np.zeros(n, dtype=int)).values
+        recommendations = []
+        reasons = []
+        rule_applied_list = []
+
+        for idx in range(n):
+            c_id = int(clusters[idx]) if idx < len(clusters) else 0
+            b_lbl = labels_bantuan[idx]
+            rule_info = rules_matrix.get((c_id, b_lbl), ("Rule R22", "Program Pendampingan Belajar Terarah", "Pendampingan standar."))
+
+            rule_code, rec_text, reason_text = rule_info
+            rule_applied_list.append(rule_code)
+            recommendations.append(rec_text)
+            reasons.append(reason_text)
+
+        df["recommendation"] = recommendations
+        df["reason"] = reasons
+        df["ruleApplied"] = rule_applied_list
+        df["ruleTrace"] = [f"IF Akademik==C{int(c)+1} AND Bantuan=='{b}' THEN {r}" for c, b, r in zip(clusters, labels_bantuan, rule_applied_list)]
+
+        return df
+    except Exception as e:
+        return df
