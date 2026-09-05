@@ -991,8 +991,34 @@ async def spatial_map(x_session_id: Optional[str] = Header(None)):
 @app.get("/stepwise/final-analysis/")
 @app.get("/stepwise/final-analysis")
 async def get_final_analysis(x_session_id: Optional[str] = Header(None)):
-    session = await get_valid_session(x_session_id); m = session.get("metrics", {})
-    return {"status": "success", "jumlah_data": len(session["df"]), "centroids": session.get("algo_state", {}).get("centroids", []), "config": session.get("config", {}), "metrics": m, "hasil_cluster": session["df"].fillna(0).to_dict(orient="records")}
+    session = await get_valid_session(x_session_id)
+    m = session.get("metrics", {})
+    state = session.get("algo_state", {})
+
+    wcss_val = safe_float(m.get("wcss", 0.0))
+    sil_val = safe_float(m.get("silhouette_score", 0.0))
+    dbi_val = safe_float(m.get("davies_bouldin_index", 0.0))
+    chi_val = safe_float(m.get("calinski_harabasz_index", 0.0))
+    iter_val = int(m.get("fcm_iterations", state.get("iteration", 0)))
+
+    dist_val = m.get("distribution", {})
+    profiles_val = m.get("cluster_profiles", {})
+
+    return {
+        "status": "success",
+        "jumlah_data": len(session["df"]),
+        "centroids": state.get("centroids", []),
+        "config": session.get("config", {}),
+        "metrics": m,
+        "wcss": wcss_val,
+        "silhouette_score": sil_val,
+        "davies_bouldin_index": dbi_val,
+        "calinski_harabasz_index": chi_val,
+        "iterations": iter_val,
+        "cluster_distribution": dist_val,
+        "cluster_profiles": profiles_val,
+        "hasil_cluster": session["df"].fillna(0).to_dict(orient="records")
+    }
 
 @app.get("/stepwise/export-excel/")
 @app.get("/stepwise/export-excel")
